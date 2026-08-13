@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block title %}発注内容の確認 | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><span class="eyebrow">REVIEW ORDER</span><h1>発注内容の確認</h1></div>
+  <div class="route-chip transaction-inline"><small>送付元</small><strong>{{ from_store.name }}</strong><span>→</span><small>受取店舗</small><strong>{{ to_store.name }}</strong></div>
+</div>
+<p class="lead">内容を確認し、問題なければ「発注する」を押してください。</p>
+
+<div class="table-card">
+  <table>
+    <thead><tr><th>商品</th><th>数量</th><th>単価</th><th>小計</th></tr></thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td data-label="商品"><strong>{{ item.name }}</strong></td>
+        <td data-label="数量">{{ item.quantity|quantity }} {{ item.unit }}</td>
+        <td data-label="単価">{{ item.unit_price|yen }}</td>
+        <td data-label="小計" class="money">{{ item.subtotal|yen }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="total-row">
+    <span>合計金額{% if not all_priced %}<small>（単価未設定の商品を除く）</small>{% endif %}</span>
+    <strong>{{ total|yen }}</strong>
+  </div>
+</div>
+<form class="action-bar" action="{{ url_for('submit_order') }}" method="post">
+  <a class="button button-secondary" href="{{ url_for('products') }}">商品選択に戻る</a>
+  <button class="button button-primary" type="submit">発注する</button>
+</form>
+{% endblock %}

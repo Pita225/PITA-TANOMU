@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block title %}月次集計 | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head report-head">
+  <div><span class="eyebrow">MONTHLY REPORT</span><h1>月次集計</h1><p class="lead">発注・受注の金額と商品内訳を月単位で確認できます。</p></div>
+  {% if g.user.role == 'admin' %}<a class="small-button" href="{{ url_for('report_corrections') }}">訂正履歴</a>{% endif %}
+</div>
+
+<form class="card report-filter" method="get">
+  <label><span>対象年月</span><input type="month" name="month" value="{{ month }}" required></label>
+  {% if g.user.role == 'admin' %}
+  <label><span>店舗</span><select name="store_id"><option value="">全店舗</option>{% for store in store_options %}<option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label>
+  {% endif %}
+  <button class="button button-primary" type="submit">表示する</button>
+</form>
+
+<div class="report-toolbar">
+  <a class="button button-secondary" href="{{ url_for('report_daily', date=month_start, store_id=selected_store_id) }}">日別明細を見る</a>
+  <details class="csv-panel"><summary>CSV出力</summary><div>
+    <a class="small-button button-resume" href="{{ url_for('report_csv', direction='orders', start_date=month_start, end_date=month_end, store_id=selected_store_id) }}">発注CSV</a>
+    <a class="small-button button-resume" href="{{ url_for('report_csv', direction='receipts', start_date=month_start, end_date=month_end, store_id=selected_store_id) }}">受注CSV</a>
+  </div></details>
+</div>
+
+<section class="report-section">
+  <div class="section-heading"><h2>店舗別サマリー</h2><span>{{ month }}</span></div>
+  <div class="table-card report-table-wrap"><table class="report-table">
+    <thead><tr><th>店舗</th><th class="number-cell">発注金額</th><th class="number-cell">受注金額</th><th class="number-cell">発注件数</th><th class="number-cell">受注件数</th></tr></thead>
+    <tbody>
+    {% set total = namespace(issue_amount=0, receipt_amount=0, issue_count=0, receipt_count=0) %}
+    {% for row in summaries %}
+      {% set total.issue_amount = total.issue_amount + row.issue_amount %}{% set total.receipt_amount = total.receipt_amount + row.receipt_amount %}{% set total.issue_count = total.issue_count + row.issue_count %}{% set total.receipt_count = total.receipt_count + row.receipt_count %}
+      <tr><td data-label="店舗"><a class="report-store-link" href="{{ url_for('report_store', store_id=row.store.id, month=month) }}">{{ row.store.name }} →</a></td><td data-label="発注金額" class="number-cell">{{ row.issue_amount|yen }}</td><td data-label="受注金額" class="number-cell">{{ row.receipt_amount|yen }}</td><td data-label="発注件数" class="number-cell">{{ row.issue_count }}</td><td data-label="受注件数" class="number-cell">{{ row.receipt_count }}</td></tr>
+    {% else %}<tr><td colspan="5">対象店舗がありません。</td></tr>{% endfor %}
+    </tbody>
+    <tfoot><tr><th>合計</th><th class="number-cell">{{ total.issue_amount|yen }}</th><th class="number-cell">{{ total.receipt_amount|yen }}</th><th class="number-cell">{{ total.issue_count }}</th><th class="number-cell">{{ total.receipt_count }}</th></tr></tfoot>
+  </table></div>
+</section>
+
+<section class="report-section">
+  <div class="section-heading"><h2>商品別集計</h2><span>取引時の単価別</span></div>
+  <div class="table-card report-table-wrap"><table class="report-table">
+    <thead><tr><th>大分類</th><th>中分類</th><th>商品名</th><th>単位</th><th class="number-cell">合計数量</th><th class="number-cell">単価</th><th class="number-cell">合計金額</th></tr></thead>
+    <tbody>{% for row in product_summary %}<tr><td data-label="大分類">{{ row.major_category_name }}</td><td data-label="中分類">{{ row.subcategory_name }}</td><td data-label="商品名"><strong>{{ row.product_name }}</strong></td><td data-label="単位">{{ row.unit }}</td><td data-label="合計数量" class="number-cell">{{ row.quantity|quantity }}</td><td data-label="単価" class="number-cell">{{ row.unit_price|yen }}</td><td data-label="合計金額" class="number-cell">{{ row.amount|yen }}</td></tr>{% else %}<tr><td colspan="7">この月の確定商品はありません。</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}商品管理 | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><span class="eyebrow">PRODUCT MANAGEMENT</span><h1>商品管理</h1><p class="lead">発注で使用する商品・分類・単位を管理します。</p></div>
+  <a class="button button-primary" href="{{ url_for('new_product') }}">＋ 商品を登録</a>
+</div>
+<div class="management-links"><a href="{{ url_for('categories') }}"><strong>分類管理</strong><span>大分類・中分類を設定 →</span></a><a href="{{ url_for('units') }}"><strong>単位管理</strong><span>kg・本・個などを設定 →</span></a></div>
+
+<div class="section-heading product-list-heading"><h2>登録済み商品</h2><span>{{ products|length }}商品</span></div>
+{% if products %}<div class="managed-product-list">
+  {% for product in products %}<article class="managed-product-card">
+    <div class="product-thumb">{% if product.image_filename %}<img src="{{ url_for('product_image', filename=product.image_filename) }}" alt="{{ product.name }}">{% else %}<span>NO<br>IMAGE</span>{% endif %}</div>
+    <div class="managed-product-info"><span class="category-path">{{ product.major_name or '未分類' }} / {{ product.subcategory_name or '未分類' }}</span><h2>{{ product.name }}</h2><p>{{ product.unit_name or product.unit }} ・ {{ product.unit_price|yen }}</p></div>
+    <span class="status-badge {% if product.is_active %}status-active{% else %}status-paused{% endif %}">{% if product.is_active %}有効{% else %}停止中{% endif %}</span>
+    <div class="managed-actions"><a class="small-button" href="{{ url_for('edit_product', product_id=product.id) }}">編集</a><form action="{{ url_for('toggle_product', product_id=product.id) }}" method="post"><button class="small-button {% if product.is_active %}button-pause{% else %}button-resume{% endif %}" type="submit">{% if product.is_active %}停止{% else %}再開{% endif %}</button></form><form action="{{ url_for('delete_product', product_id=product.id) }}" method="post" onsubmit="return confirm('「{{ product.name }}」を削除しますか？')"><button class="small-button button-danger" type="submit">削除</button></form></div>
+  </article>{% endfor %}
+</div>{% else %}<div class="empty-state">登録済みの商品はありません。</div>{% endif %}
+{% endblock %}

@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block title %}商品を選ぶ | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><span class="eyebrow">SELECT ITEMS</span><h1>商品を選ぶ</h1></div>
+  <div class="route-chip transaction-inline"><small>送付元</small><strong>{{ from_store.name }}</strong><span>→</span><small>受取店舗</small><strong>{{ to_store.name }}</strong></div>
+</div>
+<p class="lead">分類や商品名で探し、必要な商品の数量だけ入力してください。</p>
+
+<section class="product-filters card" aria-label="商品を絞り込む">
+  <label><span>大分類</span><select id="filter-major"><option value="">すべて</option>{% for category in major_categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select></label>
+  <label><span>中分類</span><select id="filter-sub"><option value="">すべて</option>{% for category in subcategories %}<option value="{{ category.id }}" data-parent="{{ category.parent_id }}">{{ category.name }}</option>{% endfor %}</select></label>
+  <label class="product-search"><span>商品名検索</span><input id="filter-name" type="search" placeholder="商品名を入力"></label>
+</section>
+
+<form action="{{ url_for('update_cart') }}" method="post">
+  <div class="product-list" id="product-list">
+    {% for product in products %}
+    <article class="product-row order-product-card" data-major="{{ product.major_category_id }}" data-sub="{{ product.subcategory_id }}" data-name="{{ product.name|lower }}">
+      <div class="product-order-thumb">{% if product.image_filename %}<img src="{{ url_for('product_image', filename=product.image_filename) }}" alt="{{ product.name }}">{% else %}<span>NO<br>IMAGE</span>{% endif %}</div>
+      <div class="product-info">
+        <span class="category-path">{{ product.major_name }} / {{ product.subcategory_name }}</span>
+        <h2>{{ product.name }}</h2>
+        <div class="meta"><span>単位：{{ product.unit }}</span><span>単価：{{ product.unit_price|yen }}</span></div>
+        {% if product.unit_price is not none %}<div class="live-subtotal" data-subtotal>数量を入力すると小計を表示</div>{% endif %}
+      </div>
+      <label class="quantity-field">
+        <span>数量</span>
+        <div><input name="quantity_{{ product.id }}" type="number" min="0" max="99999" step="any" inputmode="decimal" placeholder="0" data-price="{{ product.unit_price if product.unit_price is not none else '' }}"><b>{{ product.unit }}</b></div>
+      </label>
+    </article>
+    {% endfor %}
+  </div>
+  <div class="empty-state product-no-results" id="product-no-results" hidden>条件に一致する商品がありません。</div>
+  <div class="action-bar">
+    <a class="button button-secondary" href="{{ url_for('index') }}">店舗を選び直す</a>
+    <button class="button button-primary" type="submit">カートを確認</button>
+  </div>
+</form>
+<script>
+  const majorFilter = document.querySelector('#filter-major');
+  const subFilter = document.querySelector('#filter-sub');
+  const nameFilter = document.querySelector('#filter-name');
+  const cards = [...document.querySelectorAll('.order-product-card')];
+  const subOptions = [...subFilter.querySelectorAll('option[data-parent]')];
+  function filterProducts() {
+    const major = majorFilter.value, sub = subFilter.value;
+    const keyword = nameFilter.value.trim().toLocaleLowerCase('ja');
+    let visible = 0;
+    cards.forEach(card => {
+      const match = (!major || card.dataset.major === major) && (!sub || card.dataset.sub === sub) && (!keyword || card.dataset.name.includes(keyword));
+      card.hidden = !match; if (match) visible++;
+    });
+    document.querySelector('#product-no-results').hidden = visible !== 0;
+  }
+  majorFilter.addEventListener('change', () => {
+    subOptions.forEach(option => option.hidden = majorFilter.value && option.dataset.parent !== majorFilter.value);
+    if (subFilter.selectedOptions[0]?.hidden) subFilter.value = '';
+    filterProducts();
+  });
+  subFilter.addEventListener('change', filterProducts);
+  nameFilter.addEventListener('input', filterProducts);
+  cards.forEach(card => {
+    const input = card.querySelector('input[data-price]');
+    const subtotal = card.querySelector('[data-subtotal]');
+    input.addEventListener('input', () => {
+      if (!subtotal) return;
+      const quantity = Number(input.value), price = Number(input.dataset.price);
+      subtotal.textContent = quantity > 0 ? `${quantity} ${input.nextElementSibling.textContent} × ¥${price.toLocaleString()} ＝ ¥${Math.round(quantity * price).toLocaleString()}` : '数量を入力すると小計を表示';
+    });
+  });
+</script>
+{% endblock %}

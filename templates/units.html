@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block title %}単位管理 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('product_management') }}">← 商品管理に戻る</a>
+<div class="page-head"><div><span class="eyebrow">UNIT MANAGEMENT</span><h1>単位管理</h1><p class="lead">kg・本・個など、商品で使う単位を登録します。</p></div></div>
+<section class="card store-add-card"><h2>単位を追加</h2><form action="{{ url_for('add_unit') }}" method="post" class="store-add-form"><label><span>単位名</span><input name="name" maxlength="20" required placeholder="例：ケース"></label><button class="button button-primary" type="submit">追加</button></form></section>
+<div class="section-heading product-list-heading"><h2>登録済み単位</h2><span>{{ units|length }}件</span></div>
+<div class="unit-list">{% for unit in units %}<article class="master-row"><strong>{{ unit.name }}</strong><span class="status-badge {% if unit.is_active %}status-active{% else %}status-paused{% endif %}">{% if unit.is_active %}有効{% else %}停止中{% endif %}</span><div class="master-actions"><a class="small-button" href="{{ url_for('edit_unit', unit_id=unit.id) }}">編集</a><form action="{{ url_for('toggle_unit', unit_id=unit.id) }}" method="post"><button class="small-button {% if unit.is_active %}button-pause{% else %}button-resume{% endif %}" type="submit">{% if unit.is_active %}停止{% else %}再開{% endif %}</button></form><form action="{{ url_for('delete_unit', unit_id=unit.id) }}" method="post"><button class="small-button button-danger" type="submit">削除</button></form></div></article>{% endfor %}</div>
+{% endblock %}
+

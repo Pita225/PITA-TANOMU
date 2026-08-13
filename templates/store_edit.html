@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}店舗を編集 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('stores') }}">← 店舗管理に戻る</a>
+<section class="card edit-card">
+  <span class="eyebrow">EDIT STORE</span>
+  <h1>店舗を編集</h1>
+  <form method="post">
+    <label><span>店舗名</span><input name="name" value="{{ store.name }}" maxlength="50" required autocomplete="organization"></label>
+    <div class="action-bar">
+      <a class="button button-secondary" href="{{ url_for('stores') }}">キャンセル</a>
+      <button class="button button-primary" type="submit">変更を保存</button>
+    </div>
+  </form>
+</section>
+{% endblock %}
+

@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block title %}初期管理者の作成 | PITA_タノム{% endblock %}
+{% block content %}
+<section class="card login-card"><div class="login-mark">P</div><span class="eyebrow">FIRST SETUP</span><h1>初期管理者を作成</h1><p class="lead">この画面は初回だけ使用できます。ログイン情報は安全な場所に保管してください。</p><form method="post"><label><span>管理者ログインID</span><input name="login_id" required minlength="3" maxlength="50" pattern="[A-Za-z0-9_.-]+" autocomplete="username" autocapitalize="none"></label><label><span>パスワード（8文字以上）</span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label><label><span>パスワード確認</span><input name="password_confirmation" type="password" required minlength="8" autocomplete="new-password"></label><button class="button button-primary button-wide" type="submit">管理者を作成</button></form></section>
+{% endblock %}
+

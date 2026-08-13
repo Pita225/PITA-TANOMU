@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PITA_タノム{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="{{ url_for('index') }}">PITA_タノム</a>
+    {% if g.user %}
+    <nav aria-label="メインメニュー">
+      {% if g.user.role == 'admin' %}
+      <a href="{{ url_for('index') }}">発注する</a>
+      <a href="{{ url_for('received') }}">受注を確認</a>
+      <a href="{{ url_for('receipts') }}">受取確認</a>
+      <a href="{{ url_for('reports') }}">集計</a>
+      <a href="{{ url_for('product_management') }}">商品管理</a><a href="{{ url_for('stores') }}">店舗管理</a><a href="{{ url_for('accounts') }}">アカウント</a>
+      {% else %}
+      <a href="{{ url_for('status_list', category='orders') }}">発注</a>
+      <a href="{{ url_for('status_list', category='receipts') }}">受取</a>
+      <a href="{{ url_for('status_list', category='approved') }}">承認済</a>
+      <a href="{{ url_for('reports') }}">集計</a>
+      {% endif %}
+    </nav>
+    <div class="login-status"><span>ログイン中：<strong>{% if g.user.role == 'admin' %}管理者{% else %}{{ g.user.store_name }}{% endif %}</strong></span><form action="{{ url_for('logout') }}" method="post"><button type="submit">ログアウト</button></form></div>
+    {% endif %}
+  </header>
+  <main class="container">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+      <div class="alert alert-{{ category }}" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>店舗間発注を、かんたんに。</footer>
+</body>
+</html>

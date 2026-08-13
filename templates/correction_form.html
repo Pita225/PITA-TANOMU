@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block title %}取引明細の訂正 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('report_daily', date=line.date) }}">← 日別明細へ</a>
+<div class="page-head report-head"><div><span class="eyebrow">ADMIN CORRECTION</span><h1>取引明細の訂正</h1><p class="lead">元データは変更せず、最終確定値として訂正を追加します。</p></div></div>
+<div class="transaction-route report-route"><div><small>送付元</small><strong>{{ line.from_store_name }}</strong></div><span>↓</span><div><small>受取店舗</small><strong>{{ line.to_store_name }}</strong></div></div>
+
+<div class="correction-layout">
+  <section class="card correction-original"><h2>元の記録</h2><dl><div><dt>発注番号</dt><dd>{{ line.order_number }}</dd></div><div><dt>商品</dt><dd>{{ line.original_product_name }}</dd></div><div><dt>発注数量</dt><dd>{{ line.ordered_quantity|quantity }} {{ line.original_unit }}</dd></div><div><dt>現在の最終数量</dt><dd>{% if line.final_quantity is none %}未確定{% else %}{{ line.final_quantity|quantity }} {{ line.unit }}{% endif %}</dd></div><div><dt>現在の単価</dt><dd>{{ line.unit_price|yen }}</dd></div></dl></section>
+  <form class="card correction-form" method="post"><h2>最終確定値</h2>
+    <label><span>商品</span><select name="product_id" required>{% for product in products %}<option value="{{ product.id }}" {% if product.id == line.product_id %}selected{% endif %}>{{ product.major_name }} / {{ product.subcategory_name }} / {{ product.name }}（{{ product.unit }}）</option>{% endfor %}</select></label>
+    <label><span>最終数量</span><input name="quantity" type="number" min="0" max="99999" step="0.001" value="{{ line.final_quantity if line.final_quantity is not none else 0 }}" required></label>
+    <label><span>単価（円・未設定可）</span><input name="unit_price" type="number" min="0" max="100000000" step="1" value="{{ line.unit_price if line.unit_price is not none else '' }}"></label>
+    <label><span>訂正理由（必須）</span><textarea name="reason" rows="4" maxlength="500" required placeholder="入力ミスの内容などを具体的に入力してください。"></textarea></label>
+    <button class="button button-primary button-wide" type="submit">履歴を残して訂正する</button>
+  </form>
+</div>
+
+{% if history %}<section class="report-section"><h2>この明細の訂正履歴</h2><div class="correction-history-list">{% for row in history %}<article class="card history-card"><div><strong>{{ row.created_at }} / {{ row.admin_login_id }}</strong><p>{{ row.reason }}</p></div><div class="history-change"><span>{{ row.before_json|correction_value }}</span><b>→</b><span>{{ row.after_json|correction_value }}</span></div></article>{% endfor %}</div></section>{% endif %}
+{% endblock %}

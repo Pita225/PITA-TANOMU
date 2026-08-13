@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block title %}{{ order.order_number }} | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('received', store_id=order.to_store_id) }}">← 受注一覧に戻る</a>
+<div class="page-head">
+  <div><span class="eyebrow">{{ order.order_number }}</span><h1>受注内容・受取記録</h1><p class="lead">{{ order.created_at }}</p>
+    <span class="status-badge {% if order.status == 'received' %}status-active{% elif order.status == 'pending_sender_approval' %}status-ordered{% else %}status-paused{% endif %}">{% if order.status == 'received' %}受取完了{% elif order.status == 'pending_sender_approval' %}送付元確認待ち{% else %}発注済み{% endif %}</span>
+  </div>
+  <div class="transaction-route" aria-label="送付元 {{ order.from_store_name }} から受取店舗 {{ order.to_store_name }}"><div><small>送付元</small><strong>{{ order.from_store_name }}</strong></div><span>↓</span><div><small>受取店舗</small><strong>{{ order.to_store_name }}</strong></div></div>
+</div>
+
+{% if order.status == 'pending_sender_approval' and can_sender_action %}
+<section class="sender-approval-card card"><div><span class="eyebrow">ACTION REQUIRED</span><h2>受取内容の差異を確認してください</h2><p>受取店舗が報告した数量差異・注文外商品の受取希望を確認し、双方の記録を確定します。</p></div><form action="{{ url_for('approve_receipt_difference', order_id=order.id) }}" method="post" onsubmit="return confirm('表示されている受取内容を承認しますか？')"><button class="button button-primary" type="submit">差異を承認する</button></form></section>
+{% endif %}
+
+<div class="table-card history-table">
+  <table>
+    <thead><tr><th>商品</th><th>発注数量</th><th>実際に届いた数量</th><th>数量差異</th><th>最終受取数量</th></tr></thead>
+    <tbody>{% for item in items %}<tr>
+      <td data-label="商品"><strong>{{ item.product_name }}</strong>{% if item.unit_price is not none %}<small class="table-price">{{ item.unit_price|yen }} / {{ item.unit }}</small>{% endif %}</td>
+      <td data-label="発注数量">{{ item.quantity|quantity }} {{ item.unit }}</td>
+      <td data-label="実際に届いた数量">{% if item.received_quantity is not none %}{{ item.received_quantity|quantity }} {{ item.unit }}{% else %}未報告{% endif %}</td>
+      <td data-label="数量差異">{% if item.received_quantity is not none %}{% if item.received_quantity == item.quantity %}なし{% else %}<strong class="difference">{{ (item.received_quantity - item.quantity)|quantity }} {{ item.unit }}</strong>{% endif %}{% else %}―{% endif %}</td>
+      <td data-label="最終受取数量">{% if item.final_received_quantity is not none %}<strong>{{ item.final_received_quantity|quantity }} {{ item.unit }}</strong>{% if item.unit_price is not none %}<small class="table-price">{{ (item.final_received_quantity * item.unit_price)|yen }}</small>{% endif %}{% else %}未確定{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table>
+</div>
+
+{% if unexpected_items %}
+<section class="unexpected-section history-section">
+  <div><span class="eyebrow">UNEXPECTED ITEMS</span><h2>注文外商品</h2></div>
+  <div class="exception-list">
+  {% for item in unexpected_items %}
+    <article class="exception-card">
+      <div><span class="item-kind unexpected-kind">注文外商品</span><h3>{{ item.product_name }} {{ item.arrived_quantity|quantity }} {{ item.unit }}</h3><p>受取店舗：{% if item.decision == 'return' %}「返品する」{% else %}「この商品を受け取る」{% endif %}{% if item.unit_price is not none %} ・ {{ item.unit_price|yen }} / {{ item.unit }}{% endif %}</p></div>
+      <div class="exception-status">
+        {% if item.status == 'return_pending' %}<span class="status-badge status-return">返品予定</span>
+        {% elif item.status == 'returned' %}<span class="status-badge status-ordered">返品済み・確認が必要</span>
+        {% elif item.status == 'return_complete' %}<span class="status-badge status-active">返品完了</span>
+        {% elif item.status == 'accept_pending' %}<span class="status-badge status-ordered">承認待ち</span>
+        {% elif item.status == 'accepted' %}<span class="status-badge status-active">受取承認済み</span>{% endif %}
+        <small>最終受取 {% if item.final_received_quantity is not none %}{{ item.final_received_quantity|quantity }} {{ item.unit }}{% if item.unit_price is not none %}・{{ (item.final_received_quantity * item.unit_price)|yen }}{% endif %}{% else %}未確定{% endif %}</small>
+      </div>
+      {% if item.status == 'returned' and can_sender_action %}<form action="{{ url_for('complete_unexpected_return', order_id=order.id, item_id=item.id) }}" method="post"><button class="small-button button-resume" type="submit">返品完了にする</button></form>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if order.received_at %}<p class="approval-note">{{ order.received_at }} に最終受取が確定しました。</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}受取確認 | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head"><div><span class="eyebrow">RECEIPT CONFIRMATION</span><h1>受取確認</h1></div></div>
+<p class="lead">発注した商品が届いたら、実際の数量を確認して承認します。</p>
+{% if g.user.role == 'admin' %}<form class="card receive-filter" method="get">
+  <label><span>受け取る店舗（発注元）</span><select name="store_id" required onchange="this.form.submit()">
+    <option value="">店舗を選択してください</option>
+    {% for store in stores %}<option value="{{ store.id }}" {% if selected_store and selected_store.id == store.id %}selected{% endif %}>{{ store.name }}{% if not store.is_active %}（停止中）{% endif %}</option>{% endfor %}
+  </select></label>
+  <button class="button button-primary" type="submit">表示する</button>
+</form>{% else %}<div class="logged-store-panel">受取店舗：<strong>{{ g.user.store_name }}</strong></div>{% endif %}
+
+{% if selected_store %}
+  <h2 class="section-title">{{ selected_store.name }} の発注履歴</h2>
+  {% if orders %}
+  <div class="order-list">
+    {% for order in orders %}
+    <a class="order-card" href="{{ url_for('receipt_detail', order_id=order.id) }}">
+      <div><span class="order-number">{{ order.order_number }}</span><h3 class="transaction-inline"><span>{{ order.from_store_name }}</span><b>→</b><span>{{ order.to_store_name }}</span></h3><p>{{ order.created_at }} ・ {{ order.item_count }}商品</p></div>
+      <div class="order-total"><span class="status-badge {% if order.status == 'received' %}status-active{% elif order.status == 'pending_sender_approval' %}status-ordered{% else %}status-paused{% endif %}">{% if order.status == 'received' %}受取完了{% elif order.status == 'pending_sender_approval' %}送付元確認待ち{% else %}未確認{% endif %}</span><strong>{{ order.total|yen }}</strong><span>{% if order.status == 'ordered' %}確認する{% else %}履歴を見る{% endif %} →</span></div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<div class="empty-state">この店舗の発注履歴はまだありません。</div>{% endif %}
+{% else %}<div class="empty-state">上のメニューから受け取る店舗を選んでください。</div>{% endif %}
+{% endblock %}

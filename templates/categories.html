@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}分類管理 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('product_management') }}">← 商品管理に戻る</a>
+<div class="page-head"><div><span class="eyebrow">CATEGORY MANAGEMENT</span><h1>分類管理</h1><p class="lead">大分類の下に中分類を登録します。</p></div></div>
+<div class="master-add-grid">
+  <section class="card store-add-card"><h2>大分類を追加</h2><form action="{{ url_for('add_category') }}" method="post" class="store-add-form"><input type="hidden" name="level" value="1"><label><span>大分類名</span><input name="name" maxlength="50" required placeholder="例：肉"></label><button class="button button-primary" type="submit">追加</button></form></section>
+  <section class="card store-add-card"><h2>中分類を追加</h2><form action="{{ url_for('add_category') }}" method="post" class="master-sub-form"><input type="hidden" name="level" value="2"><label><span>大分類</span><select name="parent_id" required><option value="">選択</option>{% for major in majors if major.is_active %}<option value="{{ major.id }}">{{ major.name }}</option>{% endfor %}</select></label><label><span>中分類名</span><input name="name" maxlength="50" required placeholder="例：牛"></label><button class="button button-primary" type="submit">追加</button></form></section>
+</div>
+<div class="category-columns">
+  <section><div class="section-heading"><h2>大分類</h2><span>{{ majors|length }}件</span></div>{% for item in majors %}{% include '_master_row.html' %}{% endfor %}</section>
+  <section><div class="section-heading"><h2>中分類</h2><span>{{ subcategories|length }}件</span></div>{% for item in subcategories %}{% include '_master_row.html' %}{% endfor %}</section>
+</div>
+{% endblock %}
+

@@ -1,0 +1,6 @@
+{% extends 'base.html' %}
+{% block title %}ログイン | PITA_タノム{% endblock %}
+{% block content %}
+<section class="card login-card"><div class="login-mark">P</div><span class="eyebrow">SIGN IN</span><h1>ログイン</h1><p class="lead">社内店舗用アカウントでログインしてください。</p><form method="post"><label><span>ログインID</span><input name="login_id" required autocomplete="username" autocapitalize="none"></label><label><span>パスワード</span><input name="password" type="password" required autocomplete="current-password"></label><button class="button button-primary button-wide" type="submit">ログイン</button></form></section>
+{% endblock %}
+

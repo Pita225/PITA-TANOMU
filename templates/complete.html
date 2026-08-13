@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %}発注完了 | PITA_タノム{% endblock %}
+{% block content %}
+<section class="complete-card card">
+  <div class="checkmark">✓</div>
+  <span class="eyebrow">ORDER COMPLETE</span>
+  <h1>発注が完了しました</h1>
+  <p><strong>{{ order.to_store_name }}</strong>へ発注内容を送信しました。</p>
+  <div class="transaction-route complete-route"><div><small>送付元</small><strong>{{ order.from_store_name }}</strong></div><span>↓</span><div><small>受取店舗</small><strong>{{ order.to_store_name }}</strong></div></div>
+  <dl><div><dt>発注番号</dt><dd>{{ order.order_number }}</dd></div><div><dt>発注日時</dt><dd>{{ order.created_at }}</dd></div></dl>
+  <div class="complete-actions">
+    <a class="button button-primary" href="{{ url_for('index') }}">続けて発注する</a>
+    <a class="button button-secondary" href="{{ url_for('received', store_id=order.to_store_id) }}">受注側で確認</a>
+  </div>
+</section>
+{% endblock %}

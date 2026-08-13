@@ -1,0 +1,7 @@
+{% extends 'base.html' %}
+{% block title %}訂正履歴 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('reports') }}">← 月次集計へ</a>
+<div class="page-head report-head"><div><span class="eyebrow">AUDIT LOG</span><h1>訂正履歴</h1><p class="lead">訂正前・訂正後・理由・実行した管理者をすべて保存しています。</p></div></div>
+<div class="correction-history-list">{% for row in corrections %}<article class="card history-card"><div class="history-meta"><span class="order-number">{{ row.order_number }}</span><h2>{{ row.from_store_name }} → {{ row.to_store_name }}</h2><p>{{ row.created_at }} / 管理者：{{ row.admin_login_id }}</p><strong>理由：{{ row.reason }}</strong></div><div class="history-change"><span><small>訂正前</small>{{ row.before_json|correction_value }}</span><b>→</b><span><small>訂正後</small>{{ row.after_json|correction_value }}</span></div></article>{% else %}<div class="empty-state">訂正履歴はありません。</div>{% endfor %}</div>
+{% endblock %}

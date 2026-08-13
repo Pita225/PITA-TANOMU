@@ -1,0 +1,65 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+.secret_key
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# SQLite databases and their temporary files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Uploaded files and other local application data
+static/uploads/
+uploads/
+media/
+instance/
+var/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches, tests, and coverage output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block title %}店舗管理 | PITA_タノム{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><span class="eyebrow">STORE MANAGEMENT</span><h1>店舗管理</h1></div>
+</div>
+<p class="lead">発注元・発注先として使用する店舗を管理します。</p>
+
+<section class="card store-add-card">
+  <h2>店舗を追加</h2>
+  <form method="post" class="store-add-form">
+    <label><span>店舗名</span><input name="name" maxlength="50" required placeholder="例：南口店" autocomplete="organization"></label>
+    <button class="button button-primary" type="submit">追加する</button>
+  </form>
+</section>
+
+<section class="store-section">
+  <div class="section-heading"><h2>登録済み店舗</h2><span>{{ stores|length }}店舗</span></div>
+  {% if stores %}
+  <div class="store-table-card">
+    <table class="store-table">
+      <thead><tr><th>店舗名</th><th>状態</th><th>ログインアカウント</th><th>編集</th><th>停止／再開</th><th>削除</th></tr></thead>
+      <tbody>
+      {% for store in stores %}
+        <tr>
+          <td data-label="店舗名"><strong>{{ store.name }}</strong></td>
+          <td data-label="状態"><span class="status-badge {% if store.is_active %}status-active{% else %}status-paused{% endif %}">{% if store.is_active %}有効{% else %}停止中{% endif %}</span></td>
+          <td data-label="ログインアカウント">{% if store.account_id %}<a class="small-button" href="{{ url_for('edit_account', user_id=store.account_id) }}">{{ store.login_id }}</a>{% else %}<a class="small-button button-resume" href="{{ url_for('accounts') }}">作成する</a>{% endif %}</td>
+          <td data-label="編集"><a class="small-button" href="{{ url_for('edit_store', store_id=store.id) }}">編集</a></td>
+          <td data-label="停止／再開">
+            <form action="{{ url_for('toggle_store', store_id=store.id) }}" method="post">
+              <button class="small-button {% if store.is_active %}button-pause{% else %}button-resume{% endif %}" type="submit">{% if store.is_active %}停止{% else %}再開{% endif %}</button>
+            </form>
+          </td>
+          <td data-label="削除">
+            <form action="{{ url_for('delete_store', store_id=store.id) }}" method="post" onsubmit="return confirm('「{{ store.name }}」を削除しますか？\n過去の発注履歴は保持されます。')">
+              <button class="small-button button-danger" type="submit">削除</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty-state">登録済みの店舗はありません。</div>{% endif %}
+</section>
+{% endblock %}

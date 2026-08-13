@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %}{{ store.name }}の商品内訳 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('reports', month=month, store_id=(store.id if g.user.role == 'admin' else none)) }}">← 月次集計へ</a>
+<div class="page-head report-head"><div><span class="eyebrow">STORE BREAKDOWN</span><h1>{{ store.name }}</h1><p class="lead">{{ month }}の商品内訳です。相手店舗ごとに分けて表示します。</p></div></div>
+
+<section class="report-section"><h2>発注商品</h2><div class="table-card report-table-wrap"><table class="report-table">
+  <thead><tr><th>商品</th><th>発注先</th><th class="number-cell">数量</th><th>単位</th><th class="number-cell">単価</th><th class="number-cell">金額</th></tr></thead>
+  <tbody>{% for row in issued %}<tr><td data-label="商品"><strong>{{ row.product_name }}</strong></td><td data-label="発注先">{{ row.counterpart }}</td><td data-label="数量" class="number-cell">{{ row.quantity|quantity }}</td><td data-label="単位">{{ row.unit }}</td><td data-label="単価" class="number-cell">{{ row.unit_price|yen }}</td><td data-label="金額" class="number-cell">{{ row.amount|yen }}</td></tr>{% else %}<tr><td colspan="6">発注商品はありません。</td></tr>{% endfor %}</tbody>
+</table></div></section>
+
+<section class="report-section"><h2>受注商品（最終確定）</h2><div class="table-card report-table-wrap"><table class="report-table">
+  <thead><tr><th>商品</th><th>発注元</th><th class="number-cell">数量</th><th>単位</th><th class="number-cell">単価</th><th class="number-cell">金額</th></tr></thead>
+  <tbody>{% for row in received %}<tr><td data-label="商品"><strong>{{ row.product_name }}</strong></td><td data-label="発注元">{{ row.counterpart }}</td><td data-label="数量" class="number-cell">{{ row.quantity|quantity }}</td><td data-label="単位">{{ row.unit }}</td><td data-label="単価" class="number-cell">{{ row.unit_price|yen }}</td><td data-label="金額" class="number-cell">{{ row.amount|yen }}</td></tr>{% else %}<tr><td colspan="6">確定した受注商品はありません。</td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endblock %}

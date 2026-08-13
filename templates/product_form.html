@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block title %}{% if product %}商品を編集{% else %}商品を登録{% endif %} | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('product_management') }}">← 商品管理に戻る</a>
+<section class="card product-form-card">
+  <span class="eyebrow">{% if product %}EDIT PRODUCT{% else %}NEW PRODUCT{% endif %}</span>
+  <h1>{% if product %}商品を編集{% else %}商品を登録{% endif %}</h1>
+  <form method="post" enctype="multipart/form-data">
+    <div class="photo-field">
+      <div class="photo-preview" id="photo-preview">{% if product and product.image_filename %}<img src="{{ url_for('product_image', filename=product.image_filename) }}" alt="現在の商品写真">{% else %}<span>写真なし</span>{% endif %}</div>
+      <label><span>商品写真（任意・5MBまで）</span><input id="image-input" name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><small>PNG・JPEG・GIF・WebP</small></label>
+    </div>
+    <div class="form-grid">
+      <label><span>大分類</span><select id="major-category" name="major_category_id" required><option value="">選択してください</option>{% for category in majors %}<option value="{{ category.id }}" {% if product and product.major_category_id == category.id %}selected{% endif %}>{{ category.name }}</option>{% endfor %}</select></label>
+      <label><span>中分類</span><select id="subcategory" name="subcategory_id" required><option value="">先に大分類を選択</option>{% for category in subcategories %}<option value="{{ category.id }}" data-parent="{{ category.parent_id }}" {% if product and product.subcategory_id == category.id %}selected{% endif %}>{{ category.name }}</option>{% endfor %}</select></label>
+      <label class="wide-field"><span>商品名</span><input name="name" maxlength="100" required value="{{ product.name if product else '' }}" placeholder="例：牛タン"></label>
+      <label><span>単位</span><select name="unit_id" required><option value="">選択してください</option>{% for unit in units %}<option value="{{ unit.id }}" {% if product and product.unit_id == unit.id %}selected{% endif %}>{{ unit.name }}</option>{% endfor %}</select></label>
+      <label><span>単価（任意）</span><div class="price-input"><input name="unit_price" type="number" min="0" max="100000000" step="1" inputmode="numeric" value="{{ product.unit_price if product and product.unit_price is not none else '' }}" placeholder="3500"><b>円</b></div></label>
+    </div>
+    <div class="action-bar"><a class="button button-secondary" href="{{ url_for('product_management') }}">キャンセル</a><button class="button button-primary" type="submit">{% if product %}変更を保存{% else %}商品を登録{% endif %}</button></div>
+  </form>
+</section>
+<script>
+  const major = document.querySelector('#major-category');
+  const sub = document.querySelector('#subcategory');
+  const options = [...sub.querySelectorAll('option[data-parent]')];
+  function filterSubcategories() {
+    options.forEach(option => option.hidden = option.dataset.parent !== major.value);
+    const selected = sub.selectedOptions[0];
+    if (selected?.dataset.parent !== major.value) sub.value = '';
+  }
+  major.addEventListener('change', filterSubcategories); filterSubcategories();
+  document.querySelector('#image-input').addEventListener('change', event => {
+    const file = event.target.files[0]; if (!file) return;
+    const preview = document.querySelector('#photo-preview');
+    preview.innerHTML = ''; const image = document.createElement('img');
+    image.src = URL.createObjectURL(file); image.alt = '選択した商品写真'; preview.appendChild(image);
+  });
+</script>
+{% endblock %}

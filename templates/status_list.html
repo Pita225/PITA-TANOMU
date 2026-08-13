@@ -1,0 +1,63 @@
+{% extends 'base.html' %}
+{% set titles = {'orders': '発注', 'receipts': '受取', 'approved': '承認済', 'pending': '未承認'} %}
+{% set descriptions = {'orders': ('登録されているすべての発注です。' if g.user.role == 'admin' else '自店舗が発注元の取引です。'), 'receipts': ('受取店舗が届いた内容を報告した発注です。' if g.user.role == 'admin' else '自店舗が受取先の取引です。'), 'approved': '受取と返品に関する処理がすべて完了した関係取引です。', 'pending': '自店舗が関係する未完了の商品です。現在の担当店舗を確認してください。'} %}
+{% block title %}{{ titles[category] }}一覧 | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('index') }}">← トップに戻る</a>
+<div class="page-head status-page-head"><div><span class="eyebrow">ORDER STATUS</span><h1>{{ titles[category] }} <em>{{ counts[category] }}件</em></h1><p class="lead">{{ descriptions[category] }}</p></div></div>
+
+<div class="status-tabs">
+  <a class="{% if category == 'orders' %}active{% endif %}" href="{{ url_for('status_list', category='orders') }}">発注 {{ counts.orders }}</a>
+  <a class="{% if category == 'receipts' %}active{% endif %}" href="{{ url_for('status_list', category='receipts') }}">受取 {{ counts.receipts }}</a>
+  <a class="{% if category == 'approved' %}active{% endif %}" href="{{ url_for('status_list', category='approved') }}">承認済 {{ counts.approved }}</a>
+  {% if g.user.role == 'admin' %}<a class="pending-tab {% if category == 'pending' %}active{% endif %}" href="{{ url_for('status_list', category='pending') }}">未承認 {{ counts.pending }}</a>{% endif %}
+</div>
+
+{% if category == 'pending' %}
+  {% if tasks %}
+  <div class="pending-list">
+    {% for task in tasks %}
+    <article class="pending-card">
+      <div class="pending-main">
+        <div class="pending-card-head"><span class="order-number">{{ task.order_number }}</span><span class="pending-route">{{ task.from_store_name }} → {{ task.to_store_name }}</span></div>
+        <h2>{{ task.product_name }}</h2>
+        {% if task.task_type in ('unexpected_accept', 'return_pending', 'return_confirmation') %}
+          <p class="unexpected-label">注文外商品{% if task.task_type == 'unexpected_accept' %}・受取希望{% elif task.task_type in ('return_pending', 'return_confirmation') %}・返品{% endif %}</p>
+          <div class="quantity-summary"><span>到着 <strong>{{ task.received_quantity|quantity }} {{ task.unit }}</strong></span><span>発注 <strong>なし</strong></span></div>
+        {% else %}
+          <div class="quantity-summary"><span>発注 <strong>{{ task.ordered_quantity|quantity }} {{ task.unit }}</strong></span><span>受取 <strong>{% if task.received_quantity is not none %}{{ task.received_quantity|quantity }} {{ task.unit }}{% else %}未確認{% endif %}</strong></span></div>
+        {% endif %}
+      </div>
+      <div class="next-action"><span class="status-badge status-return">{{ task.next_store_name }}：{{ task.state_label }}</span><p>次に処理する店舗</p><strong>{{ task.next_store_name }}</strong>
+        {% if g.user.role == 'admin' or g.user.store_id == task.next_store_id %}
+          {% if task.task_type in ('receipt', 'return_pending') %}<a class="small-button button-resume" href="{{ url_for('receipt_detail', order_id=task.order_id) }}">処理画面へ</a>{% else %}<a class="small-button button-resume" href="{{ url_for('received_detail', order_id=task.order_id) }}">処理画面へ</a>{% endif %}
+        {% else %}<span class="waiting-message">相手店舗の処理待ち（操作できません）</span>{% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}<div class="empty-state success-empty">未承認の案件はありません。すべての処理が完了しています。</div>{% endif %}
+{% else %}
+  {% if orders %}
+  <div class="order-list status-order-list">
+    {% for order in orders %}
+    {% if g.user.role == 'store' %}
+    <a class="order-card store-case-card" href="{{ url_for(order.detail_endpoint, order_id=order.id) }}">
+      <div><span class="order-number">{{ order.order_number }}</span><h3>{{ order.from_store_name }} → {{ order.to_store_name }}</h3><p>{{ order.created_at }} ・ {{ order.item_count }}商品 ・ {{ order.total|yen }}</p></div>
+      <div class="case-state">
+        {% if order.action_required %}<span class="status-badge status-return">要確認</span><strong>自店舗の処理が必要です</strong><small>案件を開いて処理してください →</small>
+        {% elif order.pending_count %}<span class="status-badge status-ordered">相手店舗の処理待ち</span><strong>{{ order.waiting_tasks[0].next_store_name }}で処理中</strong><small>現在の状況を確認 →</small>
+        {% else %}<span class="status-badge status-active">処理完了</span><strong>承認済み</strong><small>履歴を確認 →</small>{% endif %}
+      </div>
+    </a>
+    {% else %}
+    <article class="order-card status-order-card">
+      <div><span class="order-number">{{ order.order_number }}</span><h3>{{ order.from_store_name }} → {{ order.to_store_name }}</h3><p>{{ order.created_at }} ・ {{ order.item_count }}商品 ・ 発注額 {{ order.total|yen }}</p></div>
+      <div class="order-status-actions"><span class="status-badge {% if order.status == 'received' %}status-active{% elif order.status == 'pending_sender_approval' %}status-ordered{% else %}status-paused{% endif %}">{% if order.status == 'received' %}受取完了{% elif order.status == 'pending_sender_approval' %}送付元確認待ち{% else %}受取確認待ち{% endif %}</span><div><a class="small-button" href="{{ url_for('received_detail', order_id=order.id) }}">受注記録</a><a class="small-button button-resume" href="{{ url_for('receipt_detail', order_id=order.id) }}">受取記録</a></div></div>
+    </article>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% else %}<div class="empty-state">該当する発注はありません。</div>{% endif %}
+{% endif %}
+{% endblock %}
