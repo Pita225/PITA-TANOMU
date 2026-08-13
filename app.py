@@ -21,6 +21,26 @@ from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY_FILE = BASE_DIR / ".secret_key"
+STORE_TYPE_LABELS = {
+    "normal": "通常",
+    "development": "開発テスト",
+    "demo": "社長デモ",
+}
+REPORT_SCOPE_LABELS = {
+    "normal": "本番（通常）",
+    "training": "トレーニング（すべて）",
+    "development": "トレーニング（開発テスト）",
+    "demo": "トレーニング（社長デモ）",
+}
+SPECIAL_STORE_NAMES = {
+    "development": ("テスト店舗A", "テスト店舗B"),
+    "demo": ("デモ店舗A", "デモ店舗B"),
+}
+RESET_SCOPE_LABELS = {
+    "training": "トレーニング",
+    "development": "開発テスト",
+    "demo": "社長デモ",
+}
 
 
 def create_app(test_config=None):
@@ -68,6 +88,10 @@ def create_app(test_config=None):
         price = snapshot.get("unit_price")
         price_text = "単価未設定" if price is None else f"単価 ¥{int(price):,}"
         return f"{snapshot.get('product_name', '―')} / {quantity_text} / {price_text}"
+
+    @app.template_filter("store_type_label")
+    def store_type_label(value):
+        return STORE_TYPE_LABELS.get(value, value)
 
     @app.before_request
     def load_logged_in_user():
@@ -162,19 +186,26 @@ def create_app(test_config=None):
     def index():
         db = get_db()
         if is_admin():
+            selected_store_type = report_scope_store_type(request.args.get("store_type"))
             stores = db.execute(
                 "SELECT * FROM stores WHERE is_active = 1 AND is_deleted = 0 ORDER BY name, id"
             ).fetchall()
             scoped_store_id = None
         else:
+            selected_store_type = report_scope_store_type(None)
             stores = db.execute(
                 """SELECT * FROM stores
-                   WHERE is_active = 1 AND is_deleted = 0 AND id <> ? ORDER BY name, id""",
-                (g.user["store_id"],),
+                   WHERE is_active = 1 AND is_deleted = 0 AND id <> ?
+                     AND store_type = (SELECT store_type FROM stores WHERE id = ?)
+                   ORDER BY name, id""",
+                (g.user["store_id"], g.user["store_id"]),
             ).fetchall()
             scoped_store_id = g.user["store_id"]
         return render_template(
-            "index.html", stores=stores, counts=dashboard_counts(scoped_store_id)
+            "index.html", stores=stores,
+            counts=dashboard_counts(scoped_store_id, selected_store_type),
+            selected_store_type=selected_store_type,
+            report_scopes=REPORT_SCOPE_LABELS,
         )
 
     @app.get("/product-images/<path:filename>")
@@ -187,13 +218,16 @@ def create_app(test_config=None):
             abort(404)
         db = get_db()
         scoped_store_id = None if is_admin() else g.user["store_id"]
-        counts = dashboard_counts(scoped_store_id)
+        selected_store_type = report_scope_store_type(request.args.get("store_type"))
+        counts = dashboard_counts(scoped_store_id, selected_store_type)
         if category == "pending" and scoped_store_id is not None:
             return redirect(url_for("index"))
         if category == "pending":
             return render_template(
                 "status_list.html", category=category, counts=counts,
-                tasks=pending_tasks(scoped_store_id), orders=[],
+                tasks=pending_tasks(scoped_store_id, selected_store_type), orders=[],
+                selected_store_type=selected_store_type,
+                selected_scope_label=REPORT_SCOPE_LABELS[selected_store_type],
             )
 
         conditions = {
@@ -204,8 +238,13 @@ def create_app(test_config=None):
                 AND ux.status IN ('return_pending', 'returned', 'accept_pending'))""",
         }
         if scoped_store_id is None:
-            scope_sql = ""
-            params = ()
+            store_ids = store_ids_for_scope(selected_store_type)
+            placeholders = ",".join("?" for _ in store_ids)
+            scope_sql = (
+                f" AND o.from_store_id IN ({placeholders})"
+                f" AND o.to_store_id IN ({placeholders})"
+            )
+            params = tuple(store_ids + store_ids)
         elif category == "orders":
             scope_sql = " AND o.from_store_id = ?"
             params = (scoped_store_id,)
@@ -235,7 +274,8 @@ def create_app(test_config=None):
             orders = decorate_store_orders(orders, scoped_store_id, category)
         return render_template(
             "status_list.html", category=category, counts=counts,
-            orders=orders, tasks=[],
+            orders=orders, tasks=[], selected_store_type=selected_store_type,
+            selected_scope_label=REPORT_SCOPE_LABELS[selected_store_type],
         )
 
     @app.post("/order/start")
@@ -243,7 +283,7 @@ def create_app(test_config=None):
         from_id = request.form.get("from_store_id", type=int) if is_admin() else g.user["store_id"]
         to_id = request.form.get("to_store_id", type=int)
         if not valid_store_pair(from_id, to_id):
-            flash("発注元と発注先には別々の店舗を選んでください。", "error")
+            flash("発注元と発注先には、同じ環境・区分の別々の店舗を選んでください。", "error")
             return redirect(url_for("index"))
         session["order_context"] = {"from_store_id": from_id, "to_store_id": to_id}
         session.pop("cart", None)
@@ -674,7 +714,10 @@ def create_app(test_config=None):
     def reports():
         month, start_date, end_date = parse_month(request.args.get("month"))
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        lines = transaction_lines(start_date, end_date)
+        scope_store_type = report_scope_store_type(
+            request.args.get("store_type"), scope_store_id
+        )
+        lines = transaction_lines(start_date, end_date, store_type=scope_store_type)
         db = get_db()
         if is_admin():
             if scope_store_id:
@@ -682,8 +725,12 @@ def create_app(test_config=None):
                     "SELECT * FROM stores WHERE id = ? AND is_deleted = 0", (scope_store_id,)
                 ).fetchall()
             else:
+                store_ids = store_ids_for_scope(scope_store_type)
+                placeholders = ",".join("?" for _ in store_ids)
                 stores = db.execute(
-                    "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY id"
+                    f"""SELECT * FROM stores
+                        WHERE is_deleted = 0 AND id IN ({placeholders}) ORDER BY id""",
+                    store_ids,
                 ).fetchall()
             store_options = db.execute(
                 "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY id"
@@ -712,6 +759,7 @@ def create_app(test_config=None):
             "reports.html", month=month, summaries=summaries,
             product_summary=product_summary, store_options=store_options,
             selected_store_id=scope_store_id,
+            selected_store_type=scope_store_type, store_types=REPORT_SCOPE_LABELS,
             month_start=start_date.isoformat(),
             month_end=(end_date - timedelta(days=1)).isoformat(),
         )
@@ -737,7 +785,13 @@ def create_app(test_config=None):
     def report_daily():
         report_date = parse_report_date(request.args.get("date"))
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        lines = transaction_lines(report_date, report_date + timedelta(days=1), scope_store_id)
+        scope_store_type = report_scope_store_type(
+            request.args.get("store_type"), scope_store_id
+        )
+        lines = transaction_lines(
+            report_date, report_date + timedelta(days=1), scope_store_id,
+            scope_store_type,
+        )
         store_options = []
         if is_admin():
             store_options = get_db().execute(
@@ -746,7 +800,8 @@ def create_app(test_config=None):
         return render_template(
             "report_daily.html", report_date=report_date.isoformat(), lines=lines,
             product_summary=aggregate_products(lines), store_options=store_options,
-            selected_store_id=scope_store_id,
+            selected_store_id=scope_store_id, selected_store_type=scope_store_type,
+            store_types=REPORT_SCOPE_LABELS,
         )
 
     @app.route("/reports/correct/<line_type>/<int:line_id>", methods=["GET", "POST"])
@@ -855,7 +910,13 @@ def create_app(test_config=None):
         if end_inclusive < start_date:
             abort(400)
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        lines = transaction_lines(start_date, end_inclusive + timedelta(days=1))
+        scope_store_type = report_scope_store_type(
+            request.args.get("store_type"), scope_store_id
+        )
+        lines = transaction_lines(
+            start_date, end_inclusive + timedelta(days=1),
+            store_type=scope_store_type,
+        )
         if scope_store_id:
             key = "from_store_id" if direction == "orders" else "to_store_id"
             lines = [line for line in lines if line[key] == scope_store_id]
@@ -1162,7 +1223,8 @@ def create_app(test_config=None):
                 return redirect(url_for("accounts"))
 
         account_rows = db.execute(
-            """SELECT u.*, s.name AS store_name, s.is_active AS store_is_active
+            """SELECT u.*, s.name AS store_name, s.store_type,
+                      s.is_active AS store_is_active
                FROM users u JOIN stores s ON s.id = u.store_id
                WHERE u.role = 'store' AND s.is_deleted = 0 ORDER BY s.id"""
         ).fetchall()
@@ -1171,7 +1233,8 @@ def create_app(test_config=None):
                WHERE s.is_deleted = 0 AND u.id IS NULL ORDER BY s.id"""
         ).fetchall()
         return render_template(
-            "accounts.html", accounts=account_rows, available_stores=available_stores
+            "accounts.html", accounts=account_rows, available_stores=available_stores,
+            store_types=STORE_TYPE_LABELS,
         )
 
     @app.route("/accounts/<int:user_id>/edit", methods=["GET", "POST"])
@@ -1232,14 +1295,20 @@ def create_app(test_config=None):
         db = get_db()
         if request.method == "POST":
             name = normalize_store_name(request.form.get("name"))
+            store_type = request.form.get("store_type", "normal")
             if not name:
                 flash("店舗名を入力してください。", "error")
             elif len(name) > 50:
                 flash("店舗名は50文字以内で入力してください。", "error")
+            elif store_type not in STORE_TYPE_LABELS:
+                flash("店舗区分を正しく選択してください。", "error")
             elif db.execute("SELECT 1 FROM stores WHERE name = ?", (name,)).fetchone():
                 flash("同じ店舗名がすでに登録されています。", "error")
             else:
-                db.execute("INSERT INTO stores (name) VALUES (?)", (name,))
+                db.execute(
+                    "INSERT INTO stores (name, store_type) VALUES (?, ?)",
+                    (name, store_type),
+                )
                 db.commit()
                 flash(f"「{name}」を追加しました。", "success")
                 return redirect(url_for("stores"))
@@ -1248,7 +1317,31 @@ def create_app(test_config=None):
                FROM stores s LEFT JOIN users u ON u.store_id = s.id AND u.role = 'store'
                WHERE s.is_deleted = 0 ORDER BY s.id"""
         ).fetchall()
-        return render_template("stores.html", stores=store_rows)
+        return render_template(
+            "stores.html", stores=store_rows, store_types=STORE_TYPE_LABELS
+        )
+
+    @app.post("/stores/provision/<store_type>")
+    @admin_required
+    def provision_special_stores(store_type):
+        names = SPECIAL_STORE_NAMES.get(store_type)
+        if names is None:
+            abort(404)
+        db = get_db()
+        created = []
+        for name in names:
+            if db.execute("SELECT 1 FROM stores WHERE name = ?", (name,)).fetchone() is None:
+                db.execute(
+                    "INSERT INTO stores (name, store_type) VALUES (?, ?)",
+                    (name, store_type),
+                )
+                created.append(name)
+        db.commit()
+        if created:
+            flash(f"{'、'.join(created)}を作成しました。アカウント画面でログイン情報を設定してください。", "success")
+        else:
+            flash("対象の店舗はすでに作成済みです。", "success")
+        return redirect(url_for("stores"))
 
     @app.route("/stores/<int:store_id>/edit", methods=["GET", "POST"])
     @admin_required
@@ -1261,20 +1354,78 @@ def create_app(test_config=None):
             abort(404)
         if request.method == "POST":
             name = normalize_store_name(request.form.get("name"))
+            store_type = request.form.get("store_type", store["store_type"])
             if not name:
                 flash("店舗名を入力してください。", "error")
             elif len(name) > 50:
                 flash("店舗名は50文字以内で入力してください。", "error")
+            elif store_type not in STORE_TYPE_LABELS:
+                flash("店舗区分を正しく選択してください。", "error")
             elif db.execute(
                 "SELECT 1 FROM stores WHERE name = ? AND id <> ?", (name, store_id)
             ).fetchone():
                 flash("同じ店舗名がすでに登録されています。", "error")
+            elif store_type != store["store_type"] and db.execute(
+                """SELECT 1 FROM orders
+                   WHERE from_store_id = ? OR to_store_id = ? LIMIT 1""",
+                (store_id, store_id),
+            ).fetchone():
+                flash("取引履歴がある店舗の区分は変更できません。", "error")
             else:
-                db.execute("UPDATE stores SET name = ? WHERE id = ?", (name, store_id))
+                db.execute(
+                    "UPDATE stores SET name = ?, store_type = ? WHERE id = ?",
+                    (name, store_type, store_id),
+                )
                 db.commit()
-                flash(f"店舗名を「{name}」に変更しました。", "success")
+                flash(f"店舗「{name}」を更新しました。", "success")
                 return redirect(url_for("stores"))
-        return render_template("store_edit.html", store=store)
+        return render_template(
+            "store_edit.html", store=store, store_types=STORE_TYPE_LABELS
+        )
+
+    @app.route("/stores/reset/<store_type>", methods=["GET", "POST"])
+    @admin_required
+    def reset_store_type_data(store_type):
+        if store_type not in RESET_SCOPE_LABELS:
+            abort(404)
+        db = get_db()
+        target_types = store_type_values(store_type)
+        placeholders = ",".join("?" for _ in target_types)
+        order_ids = [row["id"] for row in db.execute(
+            f"""SELECT o.id FROM orders o
+               JOIN stores f ON f.id = o.from_store_id
+               JOIN stores t ON t.id = o.to_store_id
+               WHERE f.store_type IN ({placeholders})
+                 AND t.store_type IN ({placeholders})""",
+            target_types + target_types,
+        ).fetchall()]
+        if request.method == "POST":
+            if request.form.get("confirmation", "").strip() != "リセット":
+                flash("確認文字「リセット」を入力してください。", "error")
+            else:
+                try:
+                    if order_ids:
+                        placeholders = ",".join("?" for _ in order_ids)
+                        db.execute(
+                            f"DELETE FROM transaction_corrections WHERE order_id IN ({placeholders})",
+                            order_ids,
+                        )
+                        db.execute(
+                            f"DELETE FROM orders WHERE id IN ({placeholders})", order_ids
+                        )
+                    db.commit()
+                except sqlite3.Error:
+                    db.rollback()
+                    raise
+                flash(
+                    f"{RESET_SCOPE_LABELS[store_type]}データをリセットしました（{len(order_ids)}件）。",
+                    "success",
+                )
+                return redirect(url_for("stores"))
+        return render_template(
+            "reset_store_data.html", store_type=store_type,
+            store_type_label=RESET_SCOPE_LABELS[store_type], order_count=len(order_ids),
+        )
 
     @app.post("/stores/<int:store_id>/toggle")
     @admin_required
@@ -1368,6 +1519,10 @@ def migrate_db():
         db.execute("ALTER TABLE stores ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if "is_deleted" not in columns:
         db.execute("ALTER TABLE stores ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+    if "store_type" not in columns:
+        db.execute(
+            "ALTER TABLE stores ADD COLUMN store_type TEXT NOT NULL DEFAULT 'normal'"
+        )
 
     db.execute(
         """CREATE TABLE IF NOT EXISTS users (
@@ -1592,12 +1747,12 @@ def migrate_db():
 def valid_store_pair(from_id, to_id):
     if not from_id or not to_id or from_id == to_id:
         return False
-    count = get_db().execute(
-        """SELECT COUNT(*) FROM stores
+    rows = get_db().execute(
+        """SELECT store_type FROM stores
            WHERE id IN (?, ?) AND is_active = 1 AND is_deleted = 0""",
         (from_id, to_id)
-    ).fetchone()[0]
-    return count == 2
+    ).fetchall()
+    return len(rows) == 2 and rows[0]["store_type"] == rows[1]["store_type"]
 
 
 def current_order_context():
@@ -1911,12 +2066,46 @@ def report_scope_store_id(requested_store_id):
     return requested_store_id
 
 
+def report_scope_store_type(requested_store_type, store_id=None):
+    db = get_db()
+    if not is_admin():
+        row = db.execute(
+            "SELECT store_type FROM stores WHERE id = ?", (g.user["store_id"],)
+        ).fetchone()
+        return row["store_type"]
+    if store_id:
+        row = db.execute(
+            "SELECT store_type FROM stores WHERE id = ?", (store_id,)
+        ).fetchone()
+        if row is None:
+            abort(404)
+        return row["store_type"]
+    return requested_store_type if requested_store_type in REPORT_SCOPE_LABELS else "normal"
+
+
+def store_type_values(store_type):
+    if store_type == "training":
+        return ("development", "demo")
+    if store_type in STORE_TYPE_LABELS:
+        return (store_type,)
+    return ("normal",)
+
+
+def store_ids_for_scope(store_type):
+    values = store_type_values(store_type)
+    placeholders = ",".join("?" for _ in values)
+    rows = get_db().execute(
+        f"SELECT id FROM stores WHERE store_type IN ({placeholders})", values
+    ).fetchall()
+    return [row["id"] for row in rows] or [-1]
+
+
 def require_report_store(store_id):
     if not is_admin() and g.user["store_id"] != store_id:
         abort(403)
 
 
-def transaction_lines(start_date=None, end_date=None, related_store_id=None):
+def transaction_lines(start_date=None, end_date=None, related_store_id=None, store_type=None):
     db = get_db()
     conditions = []
     params = []
@@ -1929,11 +2118,20 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None):
     if related_store_id:
         conditions.append("(o.from_store_id = ? OR o.to_store_id = ?)")
         params.extend([related_store_id, related_store_id])
+    if store_type:
+        values = store_type_values(store_type)
+        placeholders = ",".join("?" for _ in values)
+        conditions.append(
+            f"f.store_type IN ({placeholders}) AND t.store_type IN ({placeholders})"
+        )
+        params.extend(values)
+        params.extend(values)
     where = " AND ".join(conditions) if conditions else "1 = 1"
     ordered_rows = db.execute(
         f"""SELECT oi.*, o.order_number, o.from_store_id, o.to_store_id,
                    o.created_at AS order_created_at, o.status AS order_status,
-                   f.name AS from_store_name, t.name AS to_store_name
+                   f.name AS from_store_name, t.name AS to_store_name,
+                   f.store_type AS store_type
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             JOIN stores f ON f.id = o.from_store_id
@@ -1943,7 +2141,8 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None):
     unexpected_rows = db.execute(
         f"""SELECT ux.*, o.order_number, o.from_store_id, o.to_store_id,
                    o.created_at AS order_created_at, o.status AS order_status,
-                   f.name AS from_store_name, t.name AS to_store_name
+                   f.name AS from_store_name, t.name AS to_store_name,
+                   f.store_type AS store_type
             FROM unexpected_items ux
             JOIN orders o ON o.id = ux.order_id
             JOIN stores f ON f.id = o.from_store_id
@@ -2025,6 +2224,7 @@ def make_report_line(row, line_type, line_id, product_name, major_name, sub_name
         "created_at": created_at, "date": created_at[:10], "time": created_at[11:16],
         "from_store_id": row["from_store_id"], "to_store_id": row["to_store_id"],
         "from_store_name": row["from_store_name"], "to_store_name": row["to_store_name"],
+        "store_type": row["store_type"],
         "original_product_name": original_product_name or row["product_name"],
         "original_unit": row["unit"], "original_unit_price": ordered_price,
         "product_id": row["product_id"], "product_name": product_name,
@@ -2126,14 +2326,26 @@ def correction_history(line_type, line_id):
     return rows
 
 
-def dashboard_counts(store_id=None):
+def dashboard_counts(store_id=None, store_type=None):
     db = get_db()
     if store_id is None:
-        order_count = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-        receipt_count = db.execute(
-            "SELECT COUNT(*) FROM orders WHERE receipt_reported_at IS NOT NULL"
+        store_ids = store_ids_for_scope(store_type)
+        placeholders = ",".join("?" for _ in store_ids)
+        environment_sql = (
+            f"o.from_store_id IN ({placeholders}) AND o.to_store_id IN ({placeholders})"
+        )
+        environment_params = tuple(store_ids + store_ids)
+        order_count = db.execute(
+            f"SELECT COUNT(*) FROM orders o WHERE {environment_sql}",
+            environment_params,
         ).fetchone()[0]
-        params = ()
+        receipt_count = db.execute(
+            f"""SELECT COUNT(*) FROM orders o
+                WHERE o.receipt_reported_at IS NOT NULL AND {environment_sql}""",
+            environment_params,
+        ).fetchone()[0]
+        approved_scope = f" AND {environment_sql}"
+        params = environment_params
     else:
         order_count = db.execute(
             "SELECT COUNT(*) FROM orders WHERE from_store_id = ?", (store_id,)
@@ -2146,7 +2358,7 @@ def dashboard_counts(store_id=None):
                ))""", (store_id,)
         ).fetchone()[0]
         params = (store_id, store_id)
-    approved_scope = "" if store_id is None else " AND (o.from_store_id = ? OR o.to_store_id = ?)"
+        approved_scope = " AND (o.from_store_id = ? OR o.to_store_id = ?)"
     approved_count = db.execute(
         f"""SELECT COUNT(*) FROM orders o
            WHERE o.status = 'received' AND NOT EXISTS (
@@ -2158,7 +2370,7 @@ def dashboard_counts(store_id=None):
         "orders": order_count,
         "receipts": receipt_count,
         "approved": approved_count,
-        "pending": len(pending_tasks(store_id)),
+        "pending": len(pending_tasks(store_id, store_type)),
     }
 
 
@@ -2180,7 +2392,7 @@ def decorate_store_orders(orders, store_id, category):
     return decorated
 
 
-def pending_tasks(store_id=None):
+def pending_tasks(store_id=None, store_type=None):
     """商品単位で、次の操作が必要な案件を一覧化する。"""
     rows = get_db().execute(
         """SELECT 'receipt' AS task_type, oi.id AS task_id,
@@ -2250,6 +2462,13 @@ def pending_tasks(store_id=None):
 
            ORDER BY created_at DESC, order_id DESC, task_id"""
     ).fetchall()
+    if store_id is None and store_type:
+        allowed_store_ids = set(store_ids_for_scope(store_type))
+        rows = [
+            row for row in rows
+            if row["from_store_id"] in allowed_store_ids
+            and row["to_store_id"] in allowed_store_ids
+        ]
     if store_id is None:
         return rows
     return [

@@ -7,6 +7,7 @@
   <h1>店舗を編集</h1>
   <form method="post">
     <label><span>店舗名</span><input name="name" value="{{ store.name }}" maxlength="50" required autocomplete="organization"></label>
+    <label><span>区分</span><select name="store_type" required>{% for value, label in store_types.items() %}<option value="{{ value }}" {% if store.store_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><small>取引履歴がある店舗の区分は変更できません。</small></label>
     <div class="action-bar">
       <a class="button button-secondary" href="{{ url_for('stores') }}">キャンセル</a>
       <button class="button button-primary" type="submit">変更を保存</button>
@@ -14,4 +15,3 @@
   </form>
 </section>
 {% endblock %}
-

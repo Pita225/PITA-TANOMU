@@ -150,6 +150,22 @@ th, td { padding: 17px 22px; border-bottom: 1px solid var(--line); }
 .button-pause { color: #705e38; background: #f4ecd9; }
 .button-resume { color: #07563e; background: #dcf3e9; }
 .button-danger { color: #9b3030; background: #fbe8e8; }
+.store-type-badge { display: inline-block; margin-left: 6px; padding: 3px 7px; border-radius: 999px; font-size: .68rem; font-weight: 900; white-space: nowrap; }
+.store-type-normal { color: #315d4d; background: #e4eee9; }
+.store-type-development { color: #315d83; background: #e5f0f8; }
+.store-type-demo { color: #7a5220; background: #f8ecd8; }
+.environment-tools { margin: 18px 0 30px; padding: 24px; box-shadow: none; }
+.environment-tools h2 { margin-bottom: 8px; }
+.environment-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 18px; }
+.environment-actions form, .environment-actions .button { width: 100%; }
+.environment-actions .training-reset { grid-column: 1 / -1; }
+.environment-filter { width: fit-content; margin: 18px 0 0; padding: 13px 16px; box-shadow: none; }
+.environment-filter label { display: flex; align-items: center; gap: 12px; }
+.environment-filter select { min-width: 250px; }
+.environment-view-label { width: fit-content; margin: 12px 0 20px; padding: 9px 13px; color: var(--green-dark); background: #e7f2ec; border-radius: 9px; font-size: .84rem; }
+.reset-card { max-width: 680px; margin: 0 auto; padding: clamp(24px, 5vw, 44px); }
+.reset-warning { margin: 24px 0; padding: 18px 20px; color: #8d3028; background: #fff0eb; border: 1px solid #e6bdb2; border-radius: 12px; }
+.reset-warning p { margin: 5px 0; }
 .edit-card { max-width: 650px; margin: 0 auto; padding: clamp(24px, 5vw, 44px); }
 .edit-card h1 { font-size: clamp(1.8rem, 5vw, 2.7rem); margin-bottom: 30px; }
 .order-total .status-badge { display: inline-block; margin-bottom: 7px; }
@@ -373,6 +389,9 @@ th, td { padding: 17px 22px; border-bottom: 1px solid var(--line); }
   .account-form { grid-template-columns: 1fr; }
   .account-row { grid-template-columns: 1fr auto; }
   .account-row .master-actions { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+  .environment-actions { grid-template-columns: 1fr; }
+  .environment-actions .training-reset { grid-column: auto; }
+  .environment-filter, .environment-filter label, .environment-filter select { width: 100%; }
 }
 
 @media (max-width: 430px) {

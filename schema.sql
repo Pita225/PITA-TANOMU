@@ -11,6 +11,8 @@ DROP TABLE IF EXISTS stores;
 CREATE TABLE stores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    store_type TEXT NOT NULL DEFAULT 'normal'
+        CHECK (store_type IN ('normal', 'development', 'demo')),
     is_active INTEGER NOT NULL DEFAULT 1,
     is_deleted INTEGER NOT NULL DEFAULT 0
 );

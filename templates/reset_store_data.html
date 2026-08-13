@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}{{ store_type_label }}データをリセット | PITA_タノム{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('stores') }}">← 店舗管理に戻る</a>
+<section class="card reset-card">
+  <span class="eyebrow">RESET TRANSACTIONS</span>
+  <h1>{{ store_type_label }}データをリセット</h1>
+  <div class="reset-warning"><p>対象区分：<strong>{{ store_type_label }}</strong></p><p>削除される取引件数：<strong>{{ order_count }}件</strong></p></div>
+  <p>この区分内の取引と付随する明細・返品・訂正履歴だけを削除します。店舗、店舗アカウント、商品マスタ、通常店舗の取引は削除しません。</p>
+  <form method="post">
+    <label><span>確認のため「リセット」と入力してください</span><input name="confirmation" required autocomplete="off"></label>
+    <div class="action-bar"><a class="button button-secondary" href="{{ url_for('stores') }}">キャンセル</a><button class="button button-danger" type="submit">{{ store_type_label }}取引を削除</button></div>
+  </form>
+</section>
+{% endblock %}

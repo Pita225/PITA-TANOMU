@@ -3,11 +3,12 @@
 {% block content %}
 <section class="dashboard-section">
   <div class="section-heading"><div><span class="eyebrow">ORDER STATUS</span><h1>発注状況</h1></div><span>現在の登録データ</span></div>
+  {% if g.user.role == 'admin' %}<form class="card environment-filter" method="get"><label><span>表示中の環境</span><select name="store_type" onchange="this.form.submit()">{% for value, label in report_scopes.items() %}<option value="{{ value }}" {% if selected_store_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><noscript><button class="button button-primary" type="submit">表示</button></noscript></form>{% endif %}
   <div class="status-grid {% if g.user.role == 'store' %}store-status-grid{% endif %}">
-    <a class="status-card status-card-orders" id="status-orders" data-count="{{ counts.orders }}" href="{{ url_for('status_list', category='orders') }}"><span>発注</span><strong>{{ counts.orders }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}すべての発注{% else %}自店舗からの発注{% endif %}</p></a>
-    <a class="status-card status-card-receipts" id="status-receipts" data-count="{{ counts.receipts }}" href="{{ url_for('status_list', category='receipts') }}"><span>受取</span><strong>{{ counts.receipts }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}受取報告済み{% else %}自店舗が受取先{% endif %}</p></a>
-    <a class="status-card status-card-approved" id="status-approved" data-count="{{ counts.approved }}" href="{{ url_for('status_list', category='approved') }}"><span>承認済</span><strong>{{ counts.approved }}<small>件</small></strong><p>全処理が完了</p></a>
-    {% if g.user.role == 'admin' %}<a class="status-card status-card-pending {% if counts.pending %}has-pending{% endif %}" id="status-pending" data-count="{{ counts.pending }}" href="{{ url_for('status_list', category='pending') }}"><span>未承認</span><strong>{{ counts.pending }}<small>件</small></strong><p>未完了・確認待ち</p></a>{% endif %}
+    <a class="status-card status-card-orders" id="status-orders" data-count="{{ counts.orders }}" href="{{ url_for('status_list', category='orders', store_type=selected_store_type) }}"><span>発注</span><strong>{{ counts.orders }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}選択環境の発注{% else %}自店舗からの発注{% endif %}</p></a>
+    <a class="status-card status-card-receipts" id="status-receipts" data-count="{{ counts.receipts }}" href="{{ url_for('status_list', category='receipts', store_type=selected_store_type) }}"><span>受取</span><strong>{{ counts.receipts }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}選択環境の受取報告済み{% else %}自店舗が受取先{% endif %}</p></a>
+    <a class="status-card status-card-approved" id="status-approved" data-count="{{ counts.approved }}" href="{{ url_for('status_list', category='approved', store_type=selected_store_type) }}"><span>承認済</span><strong>{{ counts.approved }}<small>件</small></strong><p>全処理が完了</p></a>
+    {% if g.user.role == 'admin' %}<a class="status-card status-card-pending {% if counts.pending %}has-pending{% endif %}" id="status-pending" data-count="{{ counts.pending }}" href="{{ url_for('status_list', category='pending', store_type=selected_store_type) }}"><span>未承認</span><strong>{{ counts.pending }}<small>件</small></strong><p>未完了・確認待ち</p></a>{% endif %}
   </div>
 </section>
 
@@ -25,7 +26,7 @@
       {% if g.user.role == 'admin' %}
       <select id="from-store" name="from_store_id" required>
         <option value="">選択してください</option>
-        {% for store in stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}
+        {% for store in stores %}<option value="{{ store.id }}" data-store-type="{{ store.store_type }}">{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}
       </select>
       {% else %}
       <select id="from-store" disabled><option value="{{ g.user.store_id }}" selected>{{ g.user.store_name }}（ログイン店舗）</option></select>
@@ -36,7 +37,7 @@
       <span>発注先店舗</span>
       <select id="to-store" name="to_store_id" required>
         <option value="">選択してください</option>
-        {% for store in stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}
+        {% for store in stores %}<option value="{{ store.id }}" data-store-type="{{ store.store_type }}">{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}
       </select>
     </label>
   </div>
@@ -50,9 +51,11 @@
   const toStore = document.querySelector('#to-store');
   function preventSameStore(source, target) {
     [...target.options].forEach(option => {
-      option.disabled = option.value !== '' && option.value === source.value;
+      const differentType = source.value && option.value &&
+        source.selectedOptions[0].dataset.storeType !== option.dataset.storeType;
+      option.disabled = option.value !== '' && (option.value === source.value || differentType);
     });
-    if (target.value === source.value) target.value = '';
+    if (target.selectedOptions[0] && target.selectedOptions[0].disabled) target.value = '';
   }
   fromStore.addEventListener('change', () => preventSameStore(fromStore, toStore));
   toStore.addEventListener('change', () => preventSameStore(toStore, fromStore));

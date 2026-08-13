@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import csv
 import io
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 
@@ -932,6 +933,194 @@ class OrderFlowTestCase(unittest.TestCase):
         self.assertTrue(scoped_rows)
         self.assertTrue(all(row["発注元店舗"] == "本店" for row in scoped_rows))
         self.assertFalse(any(row["発注番号"] == "OTHER-ONLY" for row in scoped_rows))
+
+    def test_test_demo_environments_are_isolated_and_reset_safely(self):
+        """開発テスト・社長デモの操作、集計分離、限定リセットを確認する。"""
+        self.client.post("/stores/provision/development")
+        self.client.post("/stores/provision/demo")
+        connection = sqlite3.connect(self.database)
+        stores = {
+            row[0]: (row[1], row[2]) for row in connection.execute(
+                "SELECT name, id, store_type FROM stores"
+            )
+        }
+        self.assertEqual(stores["テスト店舗A"][1], "development")
+        self.assertEqual(stores["デモ店舗A"][1], "demo")
+        self.assertTrue(all(stores[name][1] == "normal" for name in ("本店", "駅前店", "中央店")))
+        connection.close()
+
+        credentials = {
+            "テスト店舗A": ("test-store-a", "test-store-a-pass"),
+            "テスト店舗B": ("test-store-b", "test-store-b-pass"),
+            "デモ店舗A": ("demo-store-a", "demo-store-a-pass"),
+            "デモ店舗B": ("demo-store-b", "demo-store-b-pass"),
+        }
+        for name, (login_id, password) in credentials.items():
+            self.client.post("/accounts", data={
+                "store_id": stores[name][0], "login_id": login_id, "password": password,
+            })
+        self.client.post("/accounts", data={
+            "store_id": "1", "login_id": "production-store-a",
+            "password": "production-store-a-pass",
+        })
+
+        # リセット時に残るべき通常取引を用意する。
+        connection = sqlite3.connect(self.database)
+        normal_order = connection.execute(
+            """INSERT INTO orders (order_number, from_store_id, to_store_id, status,
+                       receipt_reported_at, received_at)
+               VALUES ('NORMAL-SAFE', 1, 2, 'received', datetime('now'), datetime('now'))"""
+        ).lastrowid
+        connection.execute(
+            """INSERT INTO order_items
+               (order_id, product_id, product_name, unit, quantity, received_quantity,
+                final_received_quantity, unit_price, major_category_name, subcategory_name)
+               VALUES (?, 3, 'トマト', '個', 1, 1, 1, 120, '野菜', '果菜')""",
+            (normal_order,),
+        )
+        connection.commit()
+        connection.close()
+
+        def login(name):
+            self.client.post("/logout")
+            login_id, password = credentials[name]
+            response = self.client.post(
+                "/login", data={"login_id": login_id, "password": password}
+            )
+            self.assertEqual(response.status_code, 302)
+
+        def run_flow(prefix, store_a, store_b):
+            login(store_a)
+            page = self.client.get("/").get_data(as_text=True)
+            self.assertIn(store_b, page)
+            hidden = "デモ店舗A" if prefix == "DEV" else "テスト店舗A"
+            self.assertNotIn(hidden, page)
+            cross_target = stores["デモ店舗B" if prefix == "DEV" else "テスト店舗B"][0]
+            self.assertEqual(
+                self.client.post("/order/start", data={"to_store_id": cross_target}).status_code,
+                302,
+            )
+            self.client.post("/order/start", data={"to_store_id": stores[store_b][0]})
+            self.client.post("/cart", data={"quantity_3": "10"})
+            self.client.post("/order/submit")
+            connection = sqlite3.connect(self.database)
+            order_id, item_id = connection.execute(
+                "SELECT o.id, oi.id FROM orders o JOIN order_items oi ON oi.order_id=o.id ORDER BY o.id DESC LIMIT 1"
+            ).fetchone()
+            connection.execute(
+                "UPDATE orders SET order_number = ? WHERE id = ?", (f"{prefix}-ORDER", order_id)
+            )
+            connection.commit()
+            connection.close()
+
+            login(store_b)
+            self.client.post(f"/receipts/{order_id}", data={
+                f"received_quantity_{item_id}": "8",
+                "unexpected_product_0": "1",
+                "unexpected_quantity_0": "1",
+                "unexpected_decision_0": "return",
+            })
+            connection = sqlite3.connect(self.database)
+            unexpected_id = connection.execute(
+                "SELECT id FROM unexpected_items WHERE order_id = ?", (order_id,)
+            ).fetchone()[0]
+            connection.close()
+            self.client.post(f"/receipts/{order_id}/unexpected/{unexpected_id}/returned")
+
+            login(store_a)
+            self.client.post(f"/received/{order_id}/approve")
+            self.client.post(f"/received/{order_id}/unexpected/{unexpected_id}/complete-return")
+            connection = sqlite3.connect(self.database)
+            state = connection.execute(
+                "SELECT status FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()[0]
+            return_state = connection.execute(
+                "SELECT status FROM unexpected_items WHERE id = ?", (unexpected_id,)
+            ).fetchone()[0]
+            connection.close()
+            self.assertEqual(state, "received")
+            self.assertEqual(return_state, "return_complete")
+            return order_id
+
+        development_order = run_flow("DEV", "テスト店舗A", "テスト店舗B")
+        demo_order = run_flow("DEMO", "デモ店舗A", "デモ店舗B")
+
+        # URL・POSTを直接変更しても、他店舗・別環境の閲覧や操作はできない。
+        login("テスト店舗A")
+        self.assertEqual(self.client.get(f"/received/{demo_order}").status_code, 403)
+        self.assertEqual(self.client.get(f"/receipts/{demo_order}").status_code, 403)
+        self.assertEqual(self.client.post(f"/received/{demo_order}/approve").status_code, 403)
+        rejected = self.client.post(
+            "/order/start", data={"to_store_id": "2"}, follow_redirects=True
+        )
+        self.assertIn("同じ環境・区分", rejected.get_data(as_text=True))
+
+        self.client.post("/logout")
+        self.client.post("/login", data={
+            "login_id": "production-store-a", "password": "production-store-a-pass",
+        })
+        rejected = self.client.post(
+            "/order/start", data={"to_store_id": stores["テスト店舗A"][0]},
+            follow_redirects=True,
+        )
+        self.assertIn("同じ環境・区分", rejected.get_data(as_text=True))
+
+        self.client.post("/logout")
+        self.client.post("/login", data={"login_id": "admin", "password": "admin-pass-123"})
+        report_day = date.today().isoformat()
+        normal_report = self.client.get(f"/reports/daily?date={report_day}").get_data(as_text=True)
+        self.assertIn("NORMAL-SAFE", normal_report)
+        self.assertNotIn("DEV-ORDER", normal_report)
+        self.assertNotIn("DEMO-ORDER", normal_report)
+        development_report = self.client.get(
+            f"/reports/daily?date={report_day}&store_type=development"
+        ).get_data(as_text=True)
+        self.assertIn("DEV-ORDER", development_report)
+        self.assertNotIn("DEMO-ORDER", development_report)
+        training_month = self.client.get(
+            f"/reports?month={report_day[:7]}&store_type=training"
+        ).get_data(as_text=True)
+        self.assertIn("テスト店舗A", training_month)
+        self.assertIn("デモ店舗A", training_month)
+        demo_csv = self.client.get(
+            f"/reports/csv?direction=orders&start_date={report_day}&end_date={report_day}&store_type=demo"
+        )
+        self.assertIn("DEMO-ORDER", demo_csv.data.decode("utf-8-sig"))
+        self.assertNotIn("DEV-ORDER", demo_csv.data.decode("utf-8-sig"))
+        production_history = self.client.get("/status/orders").get_data(as_text=True)
+        self.assertIn("NORMAL-SAFE", production_history)
+        self.assertNotIn("DEV-ORDER", production_history)
+        training_history = self.client.get(
+            "/status/orders?store_type=training"
+        ).get_data(as_text=True)
+        self.assertIn("DEV-ORDER", training_history)
+        self.assertIn("DEMO-ORDER", training_history)
+        self.assertNotIn("NORMAL-SAFE", training_history)
+
+        wrong = self.client.post(
+            "/stores/reset/training", data={"confirmation": "reset"},
+            follow_redirects=True,
+        )
+        self.assertIn("確認文字", wrong.get_data(as_text=True))
+        confirmation = self.client.get("/stores/reset/training").get_data(as_text=True)
+        self.assertIn("削除される取引件数", confirmation)
+        self.assertIn("2件", confirmation)
+        self.client.post("/stores/reset/training", data={"confirmation": "リセット"})
+        connection = sqlite3.connect(self.database)
+        self.assertIsNone(connection.execute(
+            "SELECT 1 FROM orders WHERE id = ?", (development_order,)
+        ).fetchone())
+        self.assertIsNone(connection.execute(
+            "SELECT 1 FROM orders WHERE id = ?", (demo_order,)
+        ).fetchone())
+        self.assertIsNotNone(connection.execute(
+            "SELECT 1 FROM orders WHERE id = ?", (normal_order,)
+        ).fetchone())
+        self.assertEqual(connection.execute(
+            "SELECT COUNT(*) FROM stores WHERE name IN ('テスト店舗A','テスト店舗B')"
+        ).fetchone()[0], 2)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM products").fetchone()[0], 6)
+        connection.close()
 
 
 if __name__ == "__main__":

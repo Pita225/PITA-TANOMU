@@ -3,14 +3,15 @@
 {% set descriptions = {'orders': ('登録されているすべての発注です。' if g.user.role == 'admin' else '自店舗が発注元の取引です。'), 'receipts': ('受取店舗が届いた内容を報告した発注です。' if g.user.role == 'admin' else '自店舗が受取先の取引です。'), 'approved': '受取と返品に関する処理がすべて完了した関係取引です。', 'pending': '自店舗が関係する未完了の商品です。現在の担当店舗を確認してください。'} %}
 {% block title %}{{ titles[category] }}一覧 | PITA_タノム{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('index') }}">← トップに戻る</a>
+<a class="back-link" href="{{ url_for('index', store_type=selected_store_type) }}">← トップに戻る</a>
 <div class="page-head status-page-head"><div><span class="eyebrow">ORDER STATUS</span><h1>{{ titles[category] }} <em>{{ counts[category] }}件</em></h1><p class="lead">{{ descriptions[category] }}</p></div></div>
+{% if g.user.role == 'admin' %}<div class="environment-view-label">表示中：<strong>{{ selected_scope_label }}</strong></div>{% endif %}
 
 <div class="status-tabs">
-  <a class="{% if category == 'orders' %}active{% endif %}" href="{{ url_for('status_list', category='orders') }}">発注 {{ counts.orders }}</a>
-  <a class="{% if category == 'receipts' %}active{% endif %}" href="{{ url_for('status_list', category='receipts') }}">受取 {{ counts.receipts }}</a>
-  <a class="{% if category == 'approved' %}active{% endif %}" href="{{ url_for('status_list', category='approved') }}">承認済 {{ counts.approved }}</a>
-  {% if g.user.role == 'admin' %}<a class="pending-tab {% if category == 'pending' %}active{% endif %}" href="{{ url_for('status_list', category='pending') }}">未承認 {{ counts.pending }}</a>{% endif %}
+  <a class="{% if category == 'orders' %}active{% endif %}" href="{{ url_for('status_list', category='orders', store_type=selected_store_type) }}">発注 {{ counts.orders }}</a>
+  <a class="{% if category == 'receipts' %}active{% endif %}" href="{{ url_for('status_list', category='receipts', store_type=selected_store_type) }}">受取 {{ counts.receipts }}</a>
+  <a class="{% if category == 'approved' %}active{% endif %}" href="{{ url_for('status_list', category='approved', store_type=selected_store_type) }}">承認済 {{ counts.approved }}</a>
+  {% if g.user.role == 'admin' %}<a class="pending-tab {% if category == 'pending' %}active{% endif %}" href="{{ url_for('status_list', category='pending', store_type=selected_store_type) }}">未承認 {{ counts.pending }}</a>{% endif %}
 </div>
 
 {% if category == 'pending' %}

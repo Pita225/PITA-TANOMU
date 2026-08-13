@@ -1,12 +1,12 @@
 {% extends 'base.html' %}
 {% block title %}日別明細 | PITA_タノム{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('reports', month=report_date[:7], store_id=selected_store_id) }}">← 月次集計へ</a>
+<a class="back-link" href="{{ url_for('reports', month=report_date[:7], store_id=selected_store_id, store_type=selected_store_type) }}">← 月次集計へ</a>
 <div class="page-head report-head"><div><span class="eyebrow">DAILY REPORT</span><h1>日別明細</h1><p class="lead">元の発注数量と、双方で確定した最終数量を並べて確認できます。</p></div></div>
 
 <form class="card report-filter" method="get">
   <label><span>対象日</span><input type="date" name="date" value="{{ report_date }}" required></label>
-  {% if g.user.role == 'admin' %}<label><span>店舗</span><select name="store_id"><option value="">全店舗</option>{% for store in store_options %}<option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label>{% endif %}
+  {% if g.user.role == 'admin' %}<label><span>区分</span><select name="store_type">{% for value, label in store_types.items() %}<option value="{{ value }}" {% if selected_store_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><label><span>店舗</span><select name="store_id"><option value="">区分内の全店舗</option>{% for store in store_options %}<option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}</select></label>{% endif %}
   <button class="button button-primary" type="submit">表示する</button>
 </form>
 
