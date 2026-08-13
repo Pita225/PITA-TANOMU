@@ -11,8 +11,8 @@ DROP TABLE IF EXISTS stores;
 CREATE TABLE stores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    store_type TEXT NOT NULL DEFAULT 'normal'
-        CHECK (store_type IN ('normal', 'development', 'demo')),
+    environment TEXT NOT NULL DEFAULT 'production'
+        CHECK (environment IN ('production', 'training')),
     is_active INTEGER NOT NULL DEFAULT 1,
     is_deleted INTEGER NOT NULL DEFAULT 0
 );
@@ -24,6 +24,7 @@ CREATE TABLE users (
     role TEXT NOT NULL,
     store_id INTEGER UNIQUE,
     is_active INTEGER NOT NULL DEFAULT 1,
+    is_training_reviewer INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (store_id) REFERENCES stores (id),
     CHECK (role IN ('admin', 'store')),

@@ -10,20 +10,17 @@
   <h2>店舗を追加</h2>
   <form method="post" class="store-add-form">
     <label><span>店舗名</span><input name="name" maxlength="50" required placeholder="例：南口店" autocomplete="organization"></label>
-    <label><span>区分</span><select name="store_type" required>{% for value, label in store_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
+    <label><span>環境</span><select name="environment" required>{% for value, label in environments.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
     <button class="button button-primary" type="submit">追加する</button>
   </form>
 </section>
 
 <section class="card environment-tools">
-  <h2>テスト・デモ店舗を準備</h2>
-  <p class="lead">商品マスタは共通です。店舗作成後、アカウント画面で各店舗のログインIDとパスワードを設定してください。</p>
+  <h2>トレーニング店舗を準備</h2>
+  <p class="lead">商品マスタは本番と共通です。店舗作成後、アカウント画面で各店舗の専用ログイン情報を設定してください。</p>
   <div class="environment-actions">
-    <form action="{{ url_for('provision_special_stores', store_type='development') }}" method="post"><button class="button button-secondary" type="submit">テスト店舗A・Bを作成</button></form>
-    <form action="{{ url_for('provision_special_stores', store_type='demo') }}" method="post"><button class="button button-secondary" type="submit">デモ店舗A・Bを作成</button></form>
-    <a class="button button-danger" href="{{ url_for('reset_store_type_data', store_type='development') }}">開発テストデータをリセット</a>
-    <a class="button button-danger" href="{{ url_for('reset_store_type_data', store_type='demo') }}">社長デモデータをリセット</a>
-    <a class="button button-danger training-reset" href="{{ url_for('reset_store_type_data', store_type='training') }}">トレーニングデータ全体をリセット</a>
+    <form action="{{ url_for('provision_training_stores') }}" method="post"><button class="button button-secondary" type="submit">トレーニング店舗A・Bを作成</button></form>
+    <a class="button button-danger" href="{{ url_for('reset_training_data') }}">トレーニングデータをリセット</a>
   </div>
 </section>
 
@@ -32,11 +29,11 @@
   {% if stores %}
   <div class="store-table-card">
     <table class="store-table">
-      <thead><tr><th>店舗名・区分</th><th>状態</th><th>ログインアカウント</th><th>編集</th><th>停止／再開</th><th>削除</th></tr></thead>
+      <thead><tr><th>店舗名・環境</th><th>状態</th><th>ログインアカウント</th><th>編集</th><th>停止／再開</th><th>削除</th></tr></thead>
       <tbody>
       {% for store in stores %}
         <tr>
-          <td data-label="店舗名・区分"><strong>{{ store.name }}</strong> <span class="store-type-badge store-type-{{ store.store_type }}">{{ store.store_type|store_type_label }}</span></td>
+          <td data-label="店舗名・環境"><strong>{{ store.name }}</strong> <span class="store-type-badge environment-{{ store.environment }}">{{ store.environment|environment_label }}</span></td>
           <td data-label="状態"><span class="status-badge {% if store.is_active %}status-active{% else %}status-paused{% endif %}">{% if store.is_active %}有効{% else %}停止中{% endif %}</span></td>
           <td data-label="ログインアカウント">{% if store.account_id %}<a class="small-button" href="{{ url_for('edit_account', user_id=store.account_id) }}">{{ store.login_id }}</a>{% else %}<a class="small-button button-resume" href="{{ url_for('accounts') }}">作成する</a>{% endif %}</td>
           <td data-label="編集"><a class="small-button" href="{{ url_for('edit_store', store_id=store.id) }}">編集</a></td>

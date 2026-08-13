@@ -1,23 +1,23 @@
 {% extends 'base.html' %}
 {% block title %}日別明細 | PITA_タノム{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('reports', month=report_date[:7], store_id=selected_store_id, store_type=selected_store_type) }}">← 月次集計へ</a>
+<a class="back-link" href="{{ url_for('reports', month=report_date[:7], store_id=selected_store_id, environment=selected_environment) }}">← 月次集計へ</a>
 <div class="page-head report-head"><div><span class="eyebrow">DAILY REPORT</span><h1>日別明細</h1><p class="lead">元の発注数量と、双方で確定した最終数量を並べて確認できます。</p></div></div>
 
 <form class="card report-filter" method="get">
   <label><span>対象日</span><input type="date" name="date" value="{{ report_date }}" required></label>
-  {% if g.user.role == 'admin' %}<label><span>区分</span><select name="store_type">{% for value, label in store_types.items() %}<option value="{{ value }}" {% if selected_store_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><label><span>店舗</span><select name="store_id"><option value="">区分内の全店舗</option>{% for store in store_options %}<option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}</select></label>{% endif %}
+  {% if environment_operator %}{% if system_admin %}<label><span>環境</span><select name="environment">{% for value, label in environments.items() %}<option value="{{ value }}" {% if selected_environment == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endif %}<label><span>店舗</span><select name="store_id"><option value="">環境内の全店舗</option>{% for store in store_options %}<option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}［{{ store.environment|environment_label }}］</option>{% endfor %}</select></label>{% endif %}
   <button class="button button-primary" type="submit">表示する</button>
 </form>
 
 <div class="table-card report-table-wrap"><table class="report-table daily-table">
-  <thead><tr><th>時刻</th><th>送付元 → 受取先</th><th>商品</th><th class="number-cell">発注数量</th><th class="number-cell">最終数量</th><th>単位</th><th class="number-cell">単価</th><th class="number-cell">発注金額</th><th class="number-cell">最終金額</th><th>状態</th>{% if g.user.role == 'admin' %}<th>訂正</th>{% endif %}</tr></thead>
+  <thead><tr><th>時刻</th><th>送付元 → 受取先</th><th>商品</th><th class="number-cell">発注数量</th><th class="number-cell">最終数量</th><th>単位</th><th class="number-cell">単価</th><th class="number-cell">発注金額</th><th class="number-cell">最終金額</th><th>状態</th>{% if system_admin %}<th>訂正</th>{% endif %}</tr></thead>
   <tbody>{% for line in lines %}<tr class="{% if line.corrected %}corrected-row{% endif %}">
     <td data-label="時刻">{{ line.time }}</td><td data-label="店舗間"><strong>{{ line.from_store_name }} → {{ line.to_store_name }}</strong><small class="order-ref">{{ line.order_number }}</small></td>
     <td data-label="商品">{{ line.product_name }}{% if line.line_type == 'unexpected_item' %}<span class="mini-tag">注文外</span>{% endif %}</td>
     <td data-label="発注数量" class="number-cell">{{ line.ordered_quantity|quantity }}</td><td data-label="最終数量" class="number-cell">{% if line.final_quantity is none %}未確定{% else %}{{ line.final_quantity|quantity }}{% endif %}</td><td data-label="単位">{{ line.unit }}</td>
     <td data-label="単価" class="number-cell">{{ line.unit_price|yen }}</td><td data-label="発注金額" class="number-cell">{{ line.ordered_amount|yen }}</td><td data-label="最終金額" class="number-cell">{{ line.final_amount|yen }}</td><td data-label="状態"><span class="status-badge {% if line.final_quantity is none %}status-ordered{% else %}status-active{% endif %}">{{ line.status_label }}</span>{% if line.corrected %}<span class="mini-tag correction-tag">訂正あり</span>{% endif %}</td>
-    {% if g.user.role == 'admin' %}<td data-label="訂正"><a class="small-button" href="{{ url_for('correct_transaction', line_type=line.line_type, line_id=line.line_id, store_id=selected_store_id) }}">訂正</a></td>{% endif %}
+    {% if system_admin %}<td data-label="訂正"><a class="small-button" href="{{ url_for('correct_transaction', line_type=line.line_type, line_id=line.line_id, store_id=selected_store_id) }}">訂正</a></td>{% endif %}
   </tr>{% else %}<tr><td colspan="11">この日の取引はありません。</td></tr>{% endfor %}</tbody>
 </table></div>
 

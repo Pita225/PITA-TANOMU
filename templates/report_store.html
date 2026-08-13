@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}{{ store.name }}の商品内訳 | PITA_タノム{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('reports', month=month, store_id=(store.id if g.user.role == 'admin' else none)) }}">← 月次集計へ</a>
+<a class="back-link" href="{{ url_for('reports', month=month, store_id=(store.id if environment_operator else none)) }}">← 月次集計へ</a>
 <div class="page-head report-head"><div><span class="eyebrow">STORE BREAKDOWN</span><h1>{{ store.name }}</h1><p class="lead">{{ month }}の商品内訳です。相手店舗ごとに分けて表示します。</p></div></div>
 
 <section class="report-section"><h2>発注商品</h2><div class="table-card report-table-wrap"><table class="report-table">

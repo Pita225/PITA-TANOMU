@@ -7,7 +7,7 @@ from datetime import date
 from io import BytesIO
 from pathlib import Path
 
-from app import create_app, init_db
+from app import create_app, init_db, migrate_db
 
 
 class OrderFlowTestCase(unittest.TestCase):
@@ -934,7 +934,7 @@ class OrderFlowTestCase(unittest.TestCase):
         self.assertTrue(all(row["発注元店舗"] == "本店" for row in scoped_rows))
         self.assertFalse(any(row["発注番号"] == "OTHER-ONLY" for row in scoped_rows))
 
-    def test_test_demo_environments_are_isolated_and_reset_safely(self):
+    def _legacy_test_test_demo_environments_are_isolated_and_reset_safely(self):
         """開発テスト・社長デモの操作、集計分離、限定リセットを確認する。"""
         self.client.post("/stores/provision/development")
         self.client.post("/stores/provision/demo")
@@ -948,6 +948,304 @@ class OrderFlowTestCase(unittest.TestCase):
         self.assertEqual(stores["デモ店舗A"][1], "demo")
         self.assertTrue(all(stores[name][1] == "normal" for name in ("本店", "駅前店", "中央店")))
         connection.close()
+
+    def test_legacy_store_type_migration_does_not_overwrite_environment_on_restart(self):
+        """移行済みDBの再起動時に、現在のenvironmentを旧列で上書きしない。"""
+        self.client.post("/stores", data={
+            "name": "再起動確認店舗", "environment": "training",
+        })
+        connection = sqlite3.connect(self.database)
+        store_id = connection.execute(
+            "SELECT id FROM stores WHERE name = '再起動確認店舗'"
+        ).fetchone()[0]
+        connection.execute(
+            "ALTER TABLE stores ADD COLUMN store_type TEXT NOT NULL DEFAULT 'normal'"
+        )
+        connection.execute(
+            "UPDATE stores SET store_type = 'normal' WHERE id = ?", (store_id,)
+        )
+        connection.commit()
+        connection.close()
+
+        with self.app.app_context():
+            migrate_db()
+            migrate_db()
+
+        connection = sqlite3.connect(self.database)
+        environment = connection.execute(
+            "SELECT environment FROM stores WHERE id = ?", (store_id,)
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(environment, "training")
+
+    def test_transaction_theme_and_explicit_report_environment_follow_real_data(self):
+        """取引画面は実取引、集計は明示環境を優先し、不一致店舗を全店舗へ戻す。"""
+        self.client.post("/stores/provision/training")
+        self.client.post("/order/start", data={"from_store_id": 1, "to_store_id": 2})
+        self.client.post("/cart", data={"quantity_3": "2"})
+        self.client.post("/order/submit")
+        connection = sqlite3.connect(self.database)
+        order_id, item_id, order_number = connection.execute(
+            """SELECT o.id, oi.id, o.order_number FROM orders o
+               JOIN order_items oi ON oi.order_id = o.id ORDER BY o.id DESC LIMIT 1"""
+        ).fetchone()
+        training_names = [row[0] for row in connection.execute(
+            "SELECT name FROM stores WHERE environment = 'training' ORDER BY id"
+        )]
+        connection.close()
+
+        self.client.get("/?environment=training")
+        self.client.post("/order/start", data={"from_store_id": 1, "to_store_id": 2})
+        product_page = self.client.get("/products").get_data(as_text=True)
+        self.assertNotIn('class="training-mode"', product_page)
+        self.client.post("/cart", data={"quantity_3": "1"})
+        cart_page = self.client.get("/cart").get_data(as_text=True)
+        self.assertNotIn('class="training-mode"', cart_page)
+        for path in (
+            f"/order/{order_id}/complete",
+            f"/received/{order_id}",
+            f"/receipts/{order_id}",
+        ):
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertNotIn('class="training-mode"', html)
+            self.assertNotIn("トレーニング環境</div>", html)
+
+        receipt = self.client.post(
+            f"/receipts/{order_id}",
+            data={f"received_quantity_{item_id}": "2"},
+            follow_redirects=True,
+        )
+        self.assertEqual(receipt.status_code, 200)
+        self.assertNotIn('class="training-mode"', receipt.get_data(as_text=True))
+
+        today = date.today().isoformat()
+        paths = (
+            f"/reports?month={today[:7]}&store_id=1&environment=training",
+            f"/reports/daily?date={today}&store_id=1&environment=training",
+            "/received?store_id=1&environment=training",
+            "/receipts?store_id=1&environment=training",
+        )
+        for path in paths:
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn('class="training-mode"', html)
+            self.assertIn("トレーニング環境", html)
+            self.assertTrue(any(name in html for name in training_names))
+            self.assertNotIn(f'value="1" selected', html)
+            self.assertNotIn(order_number, html)
+
+        training_csv = self.client.get(
+            f"/reports/csv?direction=orders&start_date={today}&end_date={today}"
+            "&store_id=1&environment=training"
+        ).data.decode("utf-8-sig")
+        self.assertNotIn(order_number, training_csv)
+
+    def test_production_and_training_are_isolated_with_reviewer_and_reset(self):
+        """2環境、店舗単位権限、確認用権限、表示、集計、リセットを確認する。"""
+        self.client.post("/stores/provision/training")
+        self.client.post("/stores", data={
+            "name": "トレーニング店舗C", "environment": "training",
+        })
+        connection = sqlite3.connect(self.database)
+        stores = {
+            name: (store_id, environment) for name, store_id, environment in connection.execute(
+                "SELECT name, id, environment FROM stores"
+            )
+        }
+        connection.close()
+        self.assertEqual(stores["本店"][1], "production")
+        self.assertEqual(stores["トレーニング店舗A"][1], "training")
+        self.assertEqual(stores["トレーニング店舗B"][1], "training")
+
+        credentials = {
+            "トレーニング店舗A": ("training-a", "training-a-pass"),
+            "トレーニング店舗B": ("training-b", "training-b-pass"),
+            "トレーニング店舗C": ("training-c", "training-c-pass"),
+        }
+        for name, (login_id, password) in credentials.items():
+            self.client.post("/accounts", data={
+                "store_id": stores[name][0], "login_id": login_id, "password": password,
+            })
+        self.client.post("/accounts", data={
+            "store_id": "1", "login_id": "production-a", "password": "production-a-pass",
+        })
+        self.client.post("/accounts/training-reviewer", data={
+            "login_id": "president-review", "password": "president-review-pass",
+        })
+        connection = sqlite3.connect(self.database)
+        reviewer_id = connection.execute(
+            "SELECT id FROM users WHERE login_id = 'president-review'"
+        ).fetchone()[0]
+        connection.close()
+        self.client.post(f"/accounts/{reviewer_id}/edit", data={
+            "login_id": "president-review", "password": "president-review-new-pass",
+        })
+        self.client.post(f"/accounts/{reviewer_id}/toggle")
+        self.client.post("/logout")
+        stopped_login = self.client.post("/login", data={
+            "login_id": "president-review", "password": "president-review-new-pass",
+        })
+        self.assertEqual(stopped_login.status_code, 200)
+        self.client.post("/login", data={
+            "login_id": "admin", "password": "admin-pass-123",
+        })
+        self.client.post(f"/accounts/{reviewer_id}/toggle")
+
+        def login(login_id, password):
+            self.client.post("/logout")
+            response = self.client.post(
+                "/login", data={"login_id": login_id, "password": password}
+            )
+            self.assertEqual(response.status_code, 302)
+
+        def place_order(login_id, password, target_id, quantity="10"):
+            login(login_id, password)
+            self.client.post("/order/start", data={"to_store_id": target_id})
+            self.client.post("/cart", data={"quantity_3": quantity})
+            self.client.post("/order/submit")
+            connection = sqlite3.connect(self.database)
+            row = connection.execute(
+                "SELECT o.id, oi.id FROM orders o JOIN order_items oi ON oi.order_id=o.id ORDER BY o.id DESC LIMIT 1"
+            ).fetchone()
+            connection.close()
+            return row
+
+        # 本番→本番は成功し、本番→トレーニングは拒否する。
+        production_order, _ = place_order("production-a", "production-a-pass", 2, "2")
+        rejected = self.client.post(
+            "/order/start", data={"to_store_id": stores["トレーニング店舗A"][0]},
+            follow_redirects=True,
+        )
+        self.assertIn("同じ環境", rejected.get_data(as_text=True))
+
+        # A→Bの数量減少・注文外返品・承認を最後まで処理する。
+        training_order, item_id = place_order(
+            "training-a", "training-a-pass", stores["トレーニング店舗B"][0]
+        )
+        normal_page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("training-mode", normal_page)
+        self.assertIn("トレーニング環境", normal_page)
+        rejected = self.client.post("/order/start", data={"to_store_id": 1}, follow_redirects=True)
+        self.assertIn("同じ環境", rejected.get_data(as_text=True))
+
+        login("training-b", "training-b-pass")
+        self.client.post(f"/receipts/{training_order}", data={
+            f"received_quantity_{item_id}": "8",
+            "unexpected_product_0": "1", "unexpected_quantity_0": "1",
+            "unexpected_decision_0": "return",
+        })
+        connection = sqlite3.connect(self.database)
+        unexpected_id = connection.execute(
+            "SELECT id FROM unexpected_items WHERE order_id = ?", (training_order,)
+        ).fetchone()[0]
+        connection.close()
+        self.client.post(f"/receipts/{training_order}/unexpected/{unexpected_id}/returned")
+        login("training-a", "training-a-pass")
+        self.client.post(f"/received/{training_order}/approve")
+        self.client.post(f"/received/{training_order}/unexpected/{unexpected_id}/complete-return")
+
+        # B→CはAに見えず、URL・POSTの改ざんも拒否する。
+        unrelated_order, unrelated_item = place_order(
+            "training-b", "training-b-pass", stores["トレーニング店舗C"][0], "3"
+        )
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "UPDATE orders SET order_number = 'UNRELATED-B-C' WHERE id = ?",
+            (unrelated_order,),
+        )
+        connection.commit()
+        connection.close()
+        login("training-a", "training-a-pass")
+        self.assertNotIn("UNRELATED-B-C", self.client.get("/status/orders").get_data(as_text=True))
+        self.assertEqual(self.client.get(f"/received/{unrelated_order}").status_code, 403)
+        self.assertEqual(self.client.get(f"/receipts/{unrelated_order}").status_code, 403)
+        self.assertEqual(self.client.post(f"/received/{unrelated_order}/approve").status_code, 403)
+        self.assertEqual(self.client.post(
+            f"/receipts/{unrelated_order}", data={f"received_quantity_{unrelated_item}": "4"}
+        ).status_code, 403)
+
+        # 社長確認用は全トレーニング機能を使えるが、本番へはアクセスできない。
+        login("president-review", "president-review-new-pass")
+        reviewer_page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("トレーニング環境", reviewer_page)
+        self.assertIn("training-mode", reviewer_page)
+        self.assertEqual(self.client.get(f"/received/{production_order}").status_code, 403)
+        self.assertEqual(self.client.get("/reports/store/1").status_code, 403)
+        self.assertEqual(self.client.get("/stores").status_code, 403)
+        reviewer_rejected = self.client.post("/order/start", data={
+            "from_store_id": 1, "to_store_id": 2,
+        }, follow_redirects=True)
+        self.assertEqual(reviewer_rejected.status_code, 200)
+        self.assertIn("同じ環境", reviewer_rejected.get_data(as_text=True))
+        self.assertEqual(self.client.get(f"/received/{training_order}").status_code, 200)
+
+        # 社長確認用アカウントでB→Cの数量増加を確認・承認できる。
+        self.client.post(f"/receipts/{unrelated_order}", data={
+            f"received_quantity_{unrelated_item}": "4",
+        })
+        self.client.post(f"/received/{unrelated_order}/approve")
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute(
+            "SELECT status FROM orders WHERE id = ?", (unrelated_order,)
+        ).fetchone()[0], "received")
+        connection.close()
+
+        today = date.today().isoformat()
+        self.assertIn("トレーニング店舗A", self.client.get(
+            f"/reports/daily?date={today}"
+        ).get_data(as_text=True))
+        self.assertIn("トレーニング店舗A", self.client.get(
+            f"/reports?month={today[:7]}"
+        ).get_data(as_text=True))
+        training_csv = self.client.get(
+            f"/reports/csv?direction=orders&start_date={today}&end_date={today}"
+        )
+        self.assertTrue(training_csv.data.startswith(b"\xef\xbb\xbf"))
+        for path in ("/status/orders", "/status/receipts", "/status/approved", "/received", "/receipts", "/reports"):
+            page = self.client.get(path).get_data(as_text=True)
+            self.assertIn("training-mode", page)
+            self.assertIn("トレーニング環境", page)
+
+        # 管理者の本番集計・CSVにはトレーニングを混ぜない。
+        login("admin", "admin-pass-123")
+        production_daily = self.client.get(f"/reports/daily?date={today}").get_data(as_text=True)
+        self.assertNotIn("トレーニング店舗A", production_daily)
+        production_csv = self.client.get(
+            f"/reports/csv?direction=orders&start_date={today}&end_date={today}"
+        ).data.decode("utf-8-sig")
+        self.assertNotIn("トレーニング店舗A", production_csv)
+        training_daily = self.client.get(
+            f"/reports/daily?date={today}&environment=training"
+        ).get_data(as_text=True)
+        self.assertIn("トレーニング店舗A", training_daily)
+        self.assertIn("training-mode", training_daily)
+        production_page = self.client.get("/?environment=production").get_data(as_text=True)
+        self.assertNotIn("training-mode", production_page)
+
+        # 確認文字が必要。実行後も本番・商品・全アカウントは残る。
+        confirm = self.client.get("/stores/reset/training").get_data(as_text=True)
+        self.assertIn("削除される取引件数", confirm)
+        self.client.post("/stores/reset/training", data={"confirmation": "reset"})
+        connection = sqlite3.connect(self.database)
+        self.assertIsNotNone(connection.execute(
+            "SELECT 1 FROM orders WHERE id = ?", (training_order,)
+        ).fetchone())
+        connection.close()
+        self.client.post("/stores/reset/training", data={"confirmation": "リセット"})
+        connection = sqlite3.connect(self.database)
+        self.assertIsNotNone(connection.execute("SELECT 1 FROM orders WHERE id = ?", (production_order,)).fetchone())
+        self.assertEqual(connection.execute(
+            "SELECT COUNT(*) FROM orders o JOIN stores f ON f.id=o.from_store_id WHERE f.environment='training'"
+        ).fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM products").fetchone()[0], 6)
+        self.assertEqual(connection.execute(
+            "SELECT COUNT(*) FROM users WHERE login_id IN ('training-a','training-b','president-review')"
+        ).fetchone()[0], 3)
+        connection.close()
+        return
 
         credentials = {
             "テスト店舗A": ("test-store-a", "test-store-a-pass"),

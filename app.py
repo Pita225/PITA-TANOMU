@@ -21,26 +21,8 @@ from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY_FILE = BASE_DIR / ".secret_key"
-STORE_TYPE_LABELS = {
-    "normal": "通常",
-    "development": "開発テスト",
-    "demo": "社長デモ",
-}
-REPORT_SCOPE_LABELS = {
-    "normal": "本番（通常）",
-    "training": "トレーニング（すべて）",
-    "development": "トレーニング（開発テスト）",
-    "demo": "トレーニング（社長デモ）",
-}
-SPECIAL_STORE_NAMES = {
-    "development": ("テスト店舗A", "テスト店舗B"),
-    "demo": ("デモ店舗A", "デモ店舗B"),
-}
-RESET_SCOPE_LABELS = {
-    "training": "トレーニング",
-    "development": "開発テスト",
-    "demo": "社長デモ",
-}
+ENVIRONMENT_LABELS = {"production": "本番", "training": "トレーニング"}
+TRAINING_STORE_NAMES = ("トレーニング店舗A", "トレーニング店舗B")
 
 
 def create_app(test_config=None):
@@ -89,9 +71,18 @@ def create_app(test_config=None):
         price_text = "単価未設定" if price is None else f"単価 ¥{int(price):,}"
         return f"{snapshot.get('product_name', '―')} / {quantity_text} / {price_text}"
 
-    @app.template_filter("store_type_label")
-    def store_type_label(value):
-        return STORE_TYPE_LABELS.get(value, value)
+    @app.template_filter("environment_label")
+    def environment_label(value):
+        return ENVIRONMENT_LABELS.get(value, value)
+
+    @app.context_processor
+    def permission_context():
+        return {
+            "system_admin": is_admin(),
+            "environment_operator": is_environment_operator(),
+            "training_reviewer": is_training_reviewer(),
+            "training_mode": bool(getattr(g, "training_mode", False)),
+        }
 
     @app.before_request
     def load_logged_in_user():
@@ -99,7 +90,8 @@ def create_app(test_config=None):
         g.user = None
         if user_id:
             user = get_db().execute(
-                """SELECT u.*, s.name AS store_name, s.is_active AS store_is_active,
+                """SELECT u.*, s.name AS store_name, s.environment AS store_environment,
+                          s.is_active AS store_is_active,
                           s.is_deleted AS store_is_deleted
                    FROM users u LEFT JOIN stores s ON s.id = u.store_id
                    WHERE u.id = ?""", (user_id,)
@@ -112,11 +104,19 @@ def create_app(test_config=None):
             else:
                 session.clear()
 
+        if g.user and is_admin() and request.args.get("environment") in ENVIRONMENT_LABELS:
+            session["view_environment"] = request.args["environment"]
+        g.training_mode = bool(g.user) and (
+            is_training_reviewer()
+            or (g.user["role"] == "store" and g.user["store_environment"] == "training")
+            or (is_admin() and session.get("view_environment") == "training")
+        )
+
         allowed = {"login", "setup", "static"}
         if request.endpoint in allowed:
             return None
         admin_exists = get_db().execute(
-            "SELECT 1 FROM users WHERE role = 'admin' LIMIT 1"
+            "SELECT 1 FROM users WHERE role = 'admin' AND is_training_reviewer = 0 LIMIT 1"
         ).fetchone()
         if admin_exists is None:
             return redirect(url_for("setup"))
@@ -127,7 +127,7 @@ def create_app(test_config=None):
     @app.route("/setup", methods=["GET", "POST"])
     def setup():
         db = get_db()
-        if db.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone():
+        if db.execute("SELECT 1 FROM users WHERE role = 'admin' AND is_training_reviewer = 0 LIMIT 1").fetchone():
             return redirect(url_for("index") if g.user else url_for("login"))
         if request.method == "POST":
             login_id = normalize_login_id(request.form.get("login_id"))
@@ -152,7 +152,7 @@ def create_app(test_config=None):
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
-        if get_db().execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is None:
+        if get_db().execute("SELECT 1 FROM users WHERE role = 'admin' AND is_training_reviewer = 0 LIMIT 1").fetchone() is None:
             return redirect(url_for("setup"))
         if g.user:
             return redirect(url_for("index"))
@@ -185,27 +185,30 @@ def create_app(test_config=None):
     @app.get("/")
     def index():
         db = get_db()
-        if is_admin():
-            selected_store_type = report_scope_store_type(request.args.get("store_type"))
+        if is_environment_operator():
+            selected_environment = report_scope_environment(request.args.get("environment"))
             stores = db.execute(
-                "SELECT * FROM stores WHERE is_active = 1 AND is_deleted = 0 ORDER BY name, id"
+                """SELECT * FROM stores
+                   WHERE is_active = 1 AND is_deleted = 0 AND environment = ?
+                   ORDER BY name, id""", (selected_environment,)
             ).fetchall()
             scoped_store_id = None
         else:
-            selected_store_type = report_scope_store_type(None)
+            selected_environment = report_scope_environment(None)
             stores = db.execute(
                 """SELECT * FROM stores
                    WHERE is_active = 1 AND is_deleted = 0 AND id <> ?
-                     AND store_type = (SELECT store_type FROM stores WHERE id = ?)
+                     AND environment = (SELECT environment FROM stores WHERE id = ?)
                    ORDER BY name, id""",
                 (g.user["store_id"], g.user["store_id"]),
             ).fetchall()
             scoped_store_id = g.user["store_id"]
+        set_request_environment(selected_environment)
         return render_template(
             "index.html", stores=stores,
-            counts=dashboard_counts(scoped_store_id, selected_store_type),
-            selected_store_type=selected_store_type,
-            report_scopes=REPORT_SCOPE_LABELS,
+            counts=dashboard_counts(scoped_store_id, selected_environment),
+            selected_environment=selected_environment,
+            environments=ENVIRONMENT_LABELS,
         )
 
     @app.get("/product-images/<path:filename>")
@@ -217,17 +220,18 @@ def create_app(test_config=None):
         if category not in {"orders", "receipts", "approved", "pending"}:
             abort(404)
         db = get_db()
-        scoped_store_id = None if is_admin() else g.user["store_id"]
-        selected_store_type = report_scope_store_type(request.args.get("store_type"))
-        counts = dashboard_counts(scoped_store_id, selected_store_type)
+        scoped_store_id = None if is_environment_operator() else g.user["store_id"]
+        selected_environment = report_scope_environment(request.args.get("environment"))
+        set_request_environment(selected_environment)
+        counts = dashboard_counts(scoped_store_id, selected_environment)
         if category == "pending" and scoped_store_id is not None:
             return redirect(url_for("index"))
         if category == "pending":
             return render_template(
                 "status_list.html", category=category, counts=counts,
-                tasks=pending_tasks(scoped_store_id, selected_store_type), orders=[],
-                selected_store_type=selected_store_type,
-                selected_scope_label=REPORT_SCOPE_LABELS[selected_store_type],
+                tasks=pending_tasks(scoped_store_id, selected_environment), orders=[],
+                selected_environment=selected_environment,
+                selected_scope_label=ENVIRONMENT_LABELS[selected_environment],
             )
 
         conditions = {
@@ -238,7 +242,7 @@ def create_app(test_config=None):
                 AND ux.status IN ('return_pending', 'returned', 'accept_pending'))""",
         }
         if scoped_store_id is None:
-            store_ids = store_ids_for_scope(selected_store_type)
+            store_ids = store_ids_for_environment(selected_environment)
             placeholders = ",".join("?" for _ in store_ids)
             scope_sql = (
                 f" AND o.from_store_id IN ({placeholders})"
@@ -274,15 +278,16 @@ def create_app(test_config=None):
             orders = decorate_store_orders(orders, scoped_store_id, category)
         return render_template(
             "status_list.html", category=category, counts=counts,
-            orders=orders, tasks=[], selected_store_type=selected_store_type,
-            selected_scope_label=REPORT_SCOPE_LABELS[selected_store_type],
+            orders=orders, tasks=[], selected_environment=selected_environment,
+            selected_scope_label=ENVIRONMENT_LABELS[selected_environment],
         )
 
     @app.post("/order/start")
     def start_order():
-        from_id = request.form.get("from_store_id", type=int) if is_admin() else g.user["store_id"]
+        from_id = request.form.get("from_store_id", type=int) if is_environment_operator() else g.user["store_id"]
         to_id = request.form.get("to_store_id", type=int)
-        if not valid_store_pair(from_id, to_id):
+        required_environment = "training" if is_training_reviewer() else None
+        if not valid_store_pair(from_id, to_id, required_environment):
             flash("発注元と発注先には、同じ環境・区分の別々の店舗を選んでください。", "error")
             return redirect(url_for("index"))
         session["order_context"] = {"from_store_id": from_id, "to_store_id": to_id}
@@ -292,8 +297,9 @@ def create_app(test_config=None):
     @app.get("/products")
     def products():
         context = current_order_context()
-        if context is None or (not is_admin() and context.get("from_store_id") != g.user["store_id"]) or not valid_store_pair(
-            context.get("from_store_id"), context.get("to_store_id")
+        if context is None or (not is_environment_operator() and context.get("from_store_id") != g.user["store_id"]) or not valid_store_pair(
+            context.get("from_store_id"), context.get("to_store_id"),
+            "training" if is_training_reviewer() else None,
         ):
             session.pop("order_context", None)
             session.pop("cart", None)
@@ -312,6 +318,7 @@ def create_app(test_config=None):
                  AND p.is_active = 1 AND p.is_deleted = 0 ORDER BY c.name, c.id"""
         ).fetchall()
         stores = load_context_stores(context)
+        set_request_environment(stores["from_store"]["environment"])
         return render_template(
             "products.html", products=product_rows, major_categories=major_categories,
             subcategories=subcategories, **stores
@@ -320,7 +327,7 @@ def create_app(test_config=None):
     @app.post("/cart")
     def update_cart():
         context = current_order_context()
-        if context is None or (not is_admin() and context.get("from_store_id") != g.user["store_id"]):
+        if context is None or (not is_environment_operator() and context.get("from_store_id") != g.user["store_id"]):
             session.pop("order_context", None)
             session.pop("cart", None)
             return redirect(url_for("index"))
@@ -355,11 +362,12 @@ def create_app(test_config=None):
         context = current_order_context()
         items = build_cart_items(session.get("cart", []))
         if context is None or not items or (
-            not is_admin() and context.get("from_store_id") != g.user["store_id"]
+            not is_environment_operator() and context.get("from_store_id") != g.user["store_id"]
         ):
             flash("カートが空です。", "error")
             return redirect(url_for("index"))
         stores = load_context_stores(context)
+        set_request_environment(stores["from_store"]["environment"])
         total = sum(item["subtotal"] for item in items if item["subtotal"] is not None)
         priced_count = sum(item["unit_price"] is not None for item in items)
         return render_template(
@@ -372,9 +380,10 @@ def create_app(test_config=None):
         context = current_order_context()
         items = build_cart_items(session.get("cart", []))
         if context is None or not items or (
-            not is_admin() and context.get("from_store_id") != g.user["store_id"]
+            not is_environment_operator() and context.get("from_store_id") != g.user["store_id"]
         ) or not valid_store_pair(
-            context.get("from_store_id"), context.get("to_store_id")
+            context.get("from_store_id"), context.get("to_store_id"),
+            "training" if is_training_reviewer() else None,
         ):
             flash("発注内容を確認できませんでした。最初からやり直してください。", "error")
             return redirect(url_for("index"))
@@ -415,15 +424,22 @@ def create_app(test_config=None):
             abort(404)
         if not can_access_order(order):
             abort(403)
+        set_request_environment_for_order(order)
         return render_template("complete.html", order=order)
 
     @app.get("/received")
     def received():
         db = get_db()
+        store_id = report_scope_store_id(request.args.get("store_id", type=int))
+        selected_environment = report_scope_environment(
+            request.args.get("environment"), store_id
+        )
+        store_id = normalize_report_store_id(store_id, selected_environment)
+        set_request_environment(selected_environment)
         stores = db.execute(
-            "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY is_active DESC, name, id"
-        ).fetchall() if is_admin() else []
-        store_id = request.args.get("store_id", type=int) if is_admin() else g.user["store_id"]
+            """SELECT * FROM stores WHERE is_deleted = 0 AND environment = ?
+               ORDER BY is_active DESC, name, id""", (selected_environment,)
+        ).fetchall() if is_environment_operator() else []
         selected_store = None
         orders = []
         if store_id:
@@ -431,7 +447,7 @@ def create_app(test_config=None):
                 "SELECT * FROM stores WHERE id = ? AND is_deleted = 0", (store_id,)
             ).fetchone()
             if selected_store:
-                store_column = "o.to_store_id" if is_admin() else "o.from_store_id"
+                store_column = "o.to_store_id" if is_environment_operator() else "o.from_store_id"
                 orders = db.execute(
                     f"""SELECT o.*, f.name AS from_store_name, t.name AS to_store_name,
                               COUNT(oi.id) AS item_count,
@@ -456,6 +472,7 @@ def create_app(test_config=None):
             abort(404)
         if not can_access_order(order):
             abort(403)
+        set_request_environment_for_order(order)
         db = get_db()
         items = db.execute(
             "SELECT * FROM order_items WHERE order_id = ? ORDER BY id", (order_id,)
@@ -471,7 +488,7 @@ def create_app(test_config=None):
         return render_template(
             "received_detail.html", order=order, items=items,
             unexpected_items=unexpected_items, total=total, all_priced=all_priced,
-            can_sender_action=is_admin() or g.user["store_id"] == order["from_store_id"],
+            can_sender_action=is_environment_operator() or g.user["store_id"] == order["from_store_id"],
         )
 
     @app.post("/received/<int:order_id>/approve")
@@ -480,6 +497,7 @@ def create_app(test_config=None):
         order = fetch_order(order_id)
         if order is None:
             abort(404)
+        set_request_environment_for_order(order)
         require_order_role(order, "from_store_id")
         if order["status"] != "pending_sender_approval":
             flash("この発注には承認待ちの受取差異がありません。", "error")
@@ -521,6 +539,9 @@ def create_app(test_config=None):
         if item is None:
             abort(404)
         order = fetch_order(order_id)
+        if order is None:
+            abort(404)
+        set_request_environment_for_order(order)
         require_order_role(order, "from_store_id")
         if item["status"] != "returned":
             flash("返品済みの商品だけ返品完了にできます。", "error")
@@ -537,10 +558,16 @@ def create_app(test_config=None):
     @app.get("/receipts")
     def receipts():
         db = get_db()
+        store_id = report_scope_store_id(request.args.get("store_id", type=int))
+        selected_environment = report_scope_environment(
+            request.args.get("environment"), store_id
+        )
+        store_id = normalize_report_store_id(store_id, selected_environment)
+        set_request_environment(selected_environment)
         stores = db.execute(
-            "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY is_active DESC, name, id"
-        ).fetchall() if is_admin() else []
-        store_id = request.args.get("store_id", type=int) if is_admin() else g.user["store_id"]
+            """SELECT * FROM stores WHERE is_deleted = 0 AND environment = ?
+               ORDER BY is_active DESC, name, id""", (selected_environment,)
+        ).fetchall() if is_environment_operator() else []
         selected_store = None
         orders = []
         if store_id:
@@ -548,7 +575,7 @@ def create_app(test_config=None):
                 "SELECT * FROM stores WHERE id = ? AND is_deleted = 0", (store_id,)
             ).fetchone()
             if selected_store:
-                store_column = "o.from_store_id" if is_admin() else "o.to_store_id"
+                store_column = "o.from_store_id" if is_environment_operator() else "o.to_store_id"
                 orders = db.execute(
                     f"""SELECT o.*, f.name AS from_store_name, t.name AS to_store_name,
                               COUNT(oi.id) AS item_count,
@@ -576,6 +603,7 @@ def create_app(test_config=None):
             abort(404)
         if not can_access_order(order):
             abort(403)
+        set_request_environment_for_order(order)
         items = db.execute(
             "SELECT * FROM order_items WHERE order_id = ? ORDER BY id", (order_id,)
         ).fetchall()
@@ -684,7 +712,7 @@ def create_app(test_config=None):
             "receipt_detail.html", order=order, items=items,
             unexpected_items=unexpected_items, products=products,
             ordered_product_ids={item["product_id"] for item in items},
-            can_receive_action=is_admin() or g.user["store_id"] == order["to_store_id"],
+            can_receive_action=is_environment_operator() or g.user["store_id"] == order["to_store_id"],
         )
 
     @app.post("/receipts/<int:order_id>/unexpected/<int:item_id>/returned")
@@ -697,6 +725,9 @@ def create_app(test_config=None):
         if item is None:
             abort(404)
         order = fetch_order(order_id)
+        if order is None:
+            abort(404)
+        set_request_environment_for_order(order)
         require_order_role(order, "to_store_id")
         if item["status"] != "return_pending":
             flash("返品予定の商品だけ返品済みにできます。", "error")
@@ -714,18 +745,20 @@ def create_app(test_config=None):
     def reports():
         month, start_date, end_date = parse_month(request.args.get("month"))
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        scope_store_type = report_scope_store_type(
-            request.args.get("store_type"), scope_store_id
+        scope_environment = report_scope_environment(
+            request.args.get("environment"), scope_store_id
         )
-        lines = transaction_lines(start_date, end_date, store_type=scope_store_type)
+        scope_store_id = normalize_report_store_id(scope_store_id, scope_environment)
+        set_request_environment(scope_environment)
+        lines = transaction_lines(start_date, end_date, environment=scope_environment)
         db = get_db()
-        if is_admin():
+        if is_environment_operator():
             if scope_store_id:
                 stores = db.execute(
                     "SELECT * FROM stores WHERE id = ? AND is_deleted = 0", (scope_store_id,)
                 ).fetchall()
             else:
-                store_ids = store_ids_for_scope(scope_store_type)
+                store_ids = store_ids_for_environment(scope_environment)
                 placeholders = ",".join("?" for _ in store_ids)
                 stores = db.execute(
                     f"""SELECT * FROM stores
@@ -733,7 +766,9 @@ def create_app(test_config=None):
                     store_ids,
                 ).fetchall()
             store_options = db.execute(
-                "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY id"
+                """SELECT * FROM stores
+                   WHERE is_deleted = 0 AND environment = ? ORDER BY id""",
+                (scope_environment,),
             ).fetchall()
         else:
             stores = db.execute("SELECT * FROM stores WHERE id = ?", (scope_store_id,)).fetchall()
@@ -759,7 +794,7 @@ def create_app(test_config=None):
             "reports.html", month=month, summaries=summaries,
             product_summary=product_summary, store_options=store_options,
             selected_store_id=scope_store_id,
-            selected_store_type=scope_store_type, store_types=REPORT_SCOPE_LABELS,
+            selected_environment=scope_environment, environments=ENVIRONMENT_LABELS,
             month_start=start_date.isoformat(),
             month_end=(end_date - timedelta(days=1)).isoformat(),
         )
@@ -773,6 +808,7 @@ def create_app(test_config=None):
         ).fetchone()
         if store is None:
             abort(404)
+        set_request_environment(store["environment"])
         lines = transaction_lines(start_date, end_date, store_id)
         issued = aggregate_counterparty_products(lines, store_id, "orders")
         received = aggregate_counterparty_products(lines, store_id, "receipts")
@@ -785,23 +821,27 @@ def create_app(test_config=None):
     def report_daily():
         report_date = parse_report_date(request.args.get("date"))
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        scope_store_type = report_scope_store_type(
-            request.args.get("store_type"), scope_store_id
+        scope_environment = report_scope_environment(
+            request.args.get("environment"), scope_store_id
         )
+        scope_store_id = normalize_report_store_id(scope_store_id, scope_environment)
+        set_request_environment(scope_environment)
         lines = transaction_lines(
             report_date, report_date + timedelta(days=1), scope_store_id,
-            scope_store_type,
+            scope_environment,
         )
         store_options = []
-        if is_admin():
+        if is_environment_operator():
             store_options = get_db().execute(
-                "SELECT * FROM stores WHERE is_deleted = 0 ORDER BY id"
+                """SELECT * FROM stores
+                   WHERE is_deleted = 0 AND environment = ? ORDER BY id""",
+                (scope_environment,),
             ).fetchall()
         return render_template(
             "report_daily.html", report_date=report_date.isoformat(), lines=lines,
             product_summary=aggregate_products(lines), store_options=store_options,
-            selected_store_id=scope_store_id, selected_store_type=scope_store_type,
-            store_types=REPORT_SCOPE_LABELS,
+            selected_store_id=scope_store_id, selected_environment=scope_environment,
+            environments=ENVIRONMENT_LABELS,
         )
 
     @app.route("/reports/correct/<line_type>/<int:line_id>", methods=["GET", "POST"])
@@ -812,6 +852,7 @@ def create_app(test_config=None):
         line = find_transaction_line(line_type, line_id)
         if line is None:
             abort(404)
+        set_request_environment(line["environment"])
         db = get_db()
         if request.method == "POST":
             reason = " ".join(request.form.get("reason", "").split())
@@ -888,6 +929,8 @@ def create_app(test_config=None):
     @app.get("/reports/corrections")
     @admin_required
     def report_corrections():
+        environment = report_scope_environment(request.args.get("environment"))
+        set_request_environment(environment)
         rows = get_db().execute(
             """SELECT c.*, u.login_id AS admin_login_id, o.order_number,
                       f.name AS from_store_name, t.name AS to_store_name
@@ -896,9 +939,13 @@ def create_app(test_config=None):
                JOIN orders o ON o.id = c.order_id
                JOIN stores f ON f.id = o.from_store_id
                JOIN stores t ON t.id = o.to_store_id
+               WHERE f.environment = ? AND t.environment = ?
                ORDER BY c.created_at DESC, c.id DESC"""
-        ).fetchall()
-        return render_template("correction_history.html", corrections=rows)
+        , (environment, environment)).fetchall()
+        return render_template(
+            "correction_history.html", corrections=rows,
+            selected_environment=environment, environments=ENVIRONMENT_LABELS,
+        )
 
     @app.get("/reports/csv")
     def report_csv():
@@ -910,12 +957,13 @@ def create_app(test_config=None):
         if end_inclusive < start_date:
             abort(400)
         scope_store_id = report_scope_store_id(request.args.get("store_id", type=int))
-        scope_store_type = report_scope_store_type(
-            request.args.get("store_type"), scope_store_id
+        scope_environment = report_scope_environment(
+            request.args.get("environment"), scope_store_id
         )
+        scope_store_id = normalize_report_store_id(scope_store_id, scope_environment)
         lines = transaction_lines(
             start_date, end_inclusive + timedelta(days=1),
-            store_type=scope_store_type,
+            environment=scope_environment,
         )
         if scope_store_id:
             key = "from_store_id" if direction == "orders" else "to_store_id"
@@ -1223,7 +1271,7 @@ def create_app(test_config=None):
                 return redirect(url_for("accounts"))
 
         account_rows = db.execute(
-            """SELECT u.*, s.name AS store_name, s.store_type,
+            """SELECT u.*, s.name AS store_name, s.environment,
                       s.is_active AS store_is_active
                FROM users u JOIN stores s ON s.id = u.store_id
                WHERE u.role = 'store' AND s.is_deleted = 0 ORDER BY s.id"""
@@ -1232,18 +1280,48 @@ def create_app(test_config=None):
             """SELECT s.* FROM stores s LEFT JOIN users u ON u.store_id = s.id
                WHERE s.is_deleted = 0 AND u.id IS NULL ORDER BY s.id"""
         ).fetchall()
+        reviewer_accounts = db.execute(
+            """SELECT * FROM users
+               WHERE role = 'admin' AND is_training_reviewer = 1 ORDER BY id"""
+        ).fetchall()
         return render_template(
             "accounts.html", accounts=account_rows, available_stores=available_stores,
-            store_types=STORE_TYPE_LABELS,
+            reviewer_accounts=reviewer_accounts,
         )
+
+    @app.post("/accounts/training-reviewer")
+    @admin_required
+    def create_training_reviewer():
+        db = get_db()
+        login_id = normalize_login_id(request.form.get("login_id"))
+        password = request.form.get("password", "")
+        error = validate_credentials(login_id, password)
+        if db.execute("SELECT 1 FROM users WHERE login_id = ?", (login_id,)).fetchone():
+            error = "このログインIDはすでに使用されています。"
+        if error:
+            flash(error, "error")
+        else:
+            db.execute(
+                """INSERT INTO users
+                   (login_id, password_hash, role, is_training_reviewer)
+                   VALUES (?, ?, 'admin', 1)""",
+                (login_id, generate_password_hash(password)),
+            )
+            db.commit()
+            flash("社長確認用アカウントを作成しました。", "success")
+        return redirect(url_for("accounts"))
 
     @app.route("/accounts/<int:user_id>/edit", methods=["GET", "POST"])
     @admin_required
     def edit_account(user_id):
         db = get_db()
         account = db.execute(
-            """SELECT u.*, s.name AS store_name FROM users u JOIN stores s ON s.id = u.store_id
-               WHERE u.id = ? AND u.role = 'store' AND s.is_deleted = 0""",
+            """SELECT u.*, COALESCE(s.name, '社長確認用アカウント') AS store_name
+               FROM users u LEFT JOIN stores s ON s.id = u.store_id
+               WHERE u.id = ? AND (
+                   (u.role = 'store' AND s.is_deleted = 0)
+                   OR (u.role = 'admin' AND u.is_training_reviewer = 1)
+               )""",
             (user_id,),
         ).fetchone()
         if account is None:
@@ -1278,8 +1356,11 @@ def create_app(test_config=None):
     def toggle_account(user_id):
         db = get_db()
         account = db.execute(
-            """SELECT u.*, s.name AS store_name FROM users u JOIN stores s ON s.id = u.store_id
-               WHERE u.id = ? AND u.role = 'store'""", (user_id,)
+            """SELECT u.*, COALESCE(s.name, '社長確認用アカウント') AS store_name
+               FROM users u LEFT JOIN stores s ON s.id = u.store_id
+               WHERE u.id = ? AND (
+                   u.role = 'store' OR (u.role = 'admin' AND u.is_training_reviewer = 1)
+               )""", (user_id,)
         ).fetchone()
         if account is None:
             abort(404)
@@ -1295,19 +1376,19 @@ def create_app(test_config=None):
         db = get_db()
         if request.method == "POST":
             name = normalize_store_name(request.form.get("name"))
-            store_type = request.form.get("store_type", "normal")
+            environment = request.form.get("environment", "production")
             if not name:
                 flash("店舗名を入力してください。", "error")
             elif len(name) > 50:
                 flash("店舗名は50文字以内で入力してください。", "error")
-            elif store_type not in STORE_TYPE_LABELS:
-                flash("店舗区分を正しく選択してください。", "error")
+            elif environment not in ENVIRONMENT_LABELS:
+                flash("環境を正しく選択してください。", "error")
             elif db.execute("SELECT 1 FROM stores WHERE name = ?", (name,)).fetchone():
                 flash("同じ店舗名がすでに登録されています。", "error")
             else:
                 db.execute(
-                    "INSERT INTO stores (name, store_type) VALUES (?, ?)",
-                    (name, store_type),
+                    "INSERT INTO stores (name, environment) VALUES (?, ?)",
+                    (name, environment),
                 )
                 db.commit()
                 flash(f"「{name}」を追加しました。", "success")
@@ -1318,22 +1399,19 @@ def create_app(test_config=None):
                WHERE s.is_deleted = 0 ORDER BY s.id"""
         ).fetchall()
         return render_template(
-            "stores.html", stores=store_rows, store_types=STORE_TYPE_LABELS
+            "stores.html", stores=store_rows, environments=ENVIRONMENT_LABELS
         )
 
-    @app.post("/stores/provision/<store_type>")
+    @app.post("/stores/provision/training")
     @admin_required
-    def provision_special_stores(store_type):
-        names = SPECIAL_STORE_NAMES.get(store_type)
-        if names is None:
-            abort(404)
+    def provision_training_stores():
         db = get_db()
         created = []
-        for name in names:
+        for name in TRAINING_STORE_NAMES:
             if db.execute("SELECT 1 FROM stores WHERE name = ?", (name,)).fetchone() is None:
                 db.execute(
-                    "INSERT INTO stores (name, store_type) VALUES (?, ?)",
-                    (name, store_type),
+                    "INSERT INTO stores (name, environment) VALUES (?, 'training')",
+                    (name,),
                 )
                 created.append(name)
         db.commit()
@@ -1354,18 +1432,18 @@ def create_app(test_config=None):
             abort(404)
         if request.method == "POST":
             name = normalize_store_name(request.form.get("name"))
-            store_type = request.form.get("store_type", store["store_type"])
+            environment = request.form.get("environment", store["environment"])
             if not name:
                 flash("店舗名を入力してください。", "error")
             elif len(name) > 50:
                 flash("店舗名は50文字以内で入力してください。", "error")
-            elif store_type not in STORE_TYPE_LABELS:
-                flash("店舗区分を正しく選択してください。", "error")
+            elif environment not in ENVIRONMENT_LABELS:
+                flash("環境を正しく選択してください。", "error")
             elif db.execute(
                 "SELECT 1 FROM stores WHERE name = ? AND id <> ?", (name, store_id)
             ).fetchone():
                 flash("同じ店舗名がすでに登録されています。", "error")
-            elif store_type != store["store_type"] and db.execute(
+            elif environment != store["environment"] and db.execute(
                 """SELECT 1 FROM orders
                    WHERE from_store_id = ? OR to_store_id = ? LIMIT 1""",
                 (store_id, store_id),
@@ -1373,31 +1451,25 @@ def create_app(test_config=None):
                 flash("取引履歴がある店舗の区分は変更できません。", "error")
             else:
                 db.execute(
-                    "UPDATE stores SET name = ?, store_type = ? WHERE id = ?",
-                    (name, store_type, store_id),
+                    "UPDATE stores SET name = ?, environment = ? WHERE id = ?",
+                    (name, environment, store_id),
                 )
                 db.commit()
                 flash(f"店舗「{name}」を更新しました。", "success")
                 return redirect(url_for("stores"))
         return render_template(
-            "store_edit.html", store=store, store_types=STORE_TYPE_LABELS
+            "store_edit.html", store=store, environments=ENVIRONMENT_LABELS
         )
 
-    @app.route("/stores/reset/<store_type>", methods=["GET", "POST"])
+    @app.route("/stores/reset/training", methods=["GET", "POST"])
     @admin_required
-    def reset_store_type_data(store_type):
-        if store_type not in RESET_SCOPE_LABELS:
-            abort(404)
+    def reset_training_data():
         db = get_db()
-        target_types = store_type_values(store_type)
-        placeholders = ",".join("?" for _ in target_types)
         order_ids = [row["id"] for row in db.execute(
-            f"""SELECT o.id FROM orders o
+            """SELECT o.id FROM orders o
                JOIN stores f ON f.id = o.from_store_id
                JOIN stores t ON t.id = o.to_store_id
-               WHERE f.store_type IN ({placeholders})
-                 AND t.store_type IN ({placeholders})""",
-            target_types + target_types,
+               WHERE f.environment = 'training' AND t.environment = 'training'"""
         ).fetchall()]
         if request.method == "POST":
             if request.form.get("confirmation", "").strip() != "リセット":
@@ -1418,13 +1490,12 @@ def create_app(test_config=None):
                     db.rollback()
                     raise
                 flash(
-                    f"{RESET_SCOPE_LABELS[store_type]}データをリセットしました（{len(order_ids)}件）。",
+                    f"トレーニングデータをリセットしました（{len(order_ids)}件）。",
                     "success",
                 )
                 return redirect(url_for("stores"))
         return render_template(
-            "reset_store_data.html", store_type=store_type,
-            store_type_label=RESET_SCOPE_LABELS[store_type], order_count=len(order_ids),
+            "reset_store_data.html", order_count=len(order_ids),
         )
 
     @app.post("/stores/<int:store_id>/toggle")
@@ -1519,10 +1590,16 @@ def migrate_db():
         db.execute("ALTER TABLE stores ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if "is_deleted" not in columns:
         db.execute("ALTER TABLE stores ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
-    if "store_type" not in columns:
+    if "environment" not in columns:
         db.execute(
-            "ALTER TABLE stores ADD COLUMN store_type TEXT NOT NULL DEFAULT 'normal'"
+            "ALTER TABLE stores ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'"
         )
+        if "store_type" in columns:
+            db.execute(
+                """UPDATE stores SET environment = CASE
+                       WHEN store_type IN ('development', 'demo', 'training') THEN 'training'
+                       ELSE 'production' END"""
+            )
 
     db.execute(
         """CREATE TABLE IF NOT EXISTS users (
@@ -1532,6 +1609,7 @@ def migrate_db():
                role TEXT NOT NULL,
                store_id INTEGER UNIQUE,
                is_active INTEGER NOT NULL DEFAULT 1,
+               is_training_reviewer INTEGER NOT NULL DEFAULT 0,
                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                FOREIGN KEY (store_id) REFERENCES stores (id),
                CHECK (role IN ('admin', 'store')),
@@ -1539,6 +1617,24 @@ def migrate_db():
                    OR (role = 'store' AND store_id IS NOT NULL))
            )"""
     )
+    user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+    if "is_training_reviewer" not in user_columns:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN is_training_reviewer INTEGER NOT NULL DEFAULT 0"
+        )
+
+    legacy_names = ("テスト店舗A", "テスト店舗B", "デモ店舗A", "デモ店舗B")
+    legacy_rows = db.execute(
+        """SELECT id FROM stores
+           WHERE name IN (?, ?, ?, ?) AND environment = 'training' ORDER BY id""",
+        legacy_names,
+    ).fetchall()
+    used_names = {row["name"] for row in db.execute("SELECT name FROM stores")}
+    training_names = [f"トレーニング店舗{chr(code)}" for code in range(65, 91)]
+    for row in legacy_rows:
+        target_name = next(name for name in training_names if name not in used_names)
+        db.execute("UPDATE stores SET name = ? WHERE id = ?", (target_name, row["id"]))
+        used_names.add(target_name)
 
     db.execute(
         """CREATE TABLE IF NOT EXISTS product_categories (
@@ -1744,15 +1840,19 @@ def migrate_db():
     db.commit()
 
 
-def valid_store_pair(from_id, to_id):
+def valid_store_pair(from_id, to_id, required_environment=None):
     if not from_id or not to_id or from_id == to_id:
         return False
     rows = get_db().execute(
-        """SELECT store_type FROM stores
+        """SELECT environment FROM stores
            WHERE id IN (?, ?) AND is_active = 1 AND is_deleted = 0""",
         (from_id, to_id)
     ).fetchall()
-    return len(rows) == 2 and rows[0]["store_type"] == rows[1]["store_type"]
+    return (
+        len(rows) == 2
+        and rows[0]["environment"] == rows[1]["environment"]
+        and (required_environment is None or rows[0]["environment"] == required_environment)
+    )
 
 
 def current_order_context():
@@ -1811,7 +1911,8 @@ def build_cart_items(cart):
 
 def fetch_order(order_id):
     return get_db().execute(
-        """SELECT o.*, f.name AS from_store_name, t.name AS to_store_name
+        """SELECT o.*, f.name AS from_store_name, t.name AS to_store_name,
+                  f.environment AS from_environment, t.environment AS to_environment
            FROM orders o JOIN stores f ON f.id = o.from_store_id
            JOIN stores t ON t.id = o.to_store_id WHERE o.id = ?""",
         (order_id,),
@@ -1847,24 +1948,53 @@ def admin_required(view):
     def wrapped(*args, **kwargs):
         if g.user is None:
             return redirect(url_for("login"))
-        if g.user["role"] != "admin":
+        if not is_admin():
             abort(403)
         return view(*args, **kwargs)
     return wrapped
 
 
 def is_admin():
-    return g.user is not None and g.user["role"] == "admin"
+    return (
+        g.user is not None and g.user["role"] == "admin"
+        and not g.user["is_training_reviewer"]
+    )
+
+
+def is_training_reviewer():
+    return bool(
+        g.user is not None and g.user["role"] == "admin"
+        and g.user["is_training_reviewer"]
+    )
+
+
+def is_environment_operator():
+    return is_admin() or is_training_reviewer()
+
+
+def order_is_training(order):
+    return order["from_environment"] == "training" and order["to_environment"] == "training"
+
+
+def set_request_environment(environment):
+    """表示中の実データを基準に、このリクエストの画面テーマを確定する。"""
+    g.training_mode = environment == "training"
+
+
+def set_request_environment_for_order(order):
+    set_request_environment("training" if order_is_training(order) else "production")
 
 
 def can_access_order(order):
-    return is_admin() or (
+    return is_admin() or (is_training_reviewer() and order_is_training(order)) or (
         g.user and g.user["store_id"] in {order["from_store_id"], order["to_store_id"]}
     )
 
 
 def require_order_role(order, store_column):
     if is_admin():
+        return
+    if is_training_reviewer() and order_is_training(order):
         return
     if g.user is None or g.user["store_id"] != order[store_column]:
         abort(403)
@@ -2054,58 +2184,79 @@ def parse_report_date(value, default=None):
 
 
 def report_scope_store_id(requested_store_id):
-    if not is_admin():
+    if not is_environment_operator():
         return g.user["store_id"]
     if not requested_store_id:
         return None
     exists = get_db().execute(
-        "SELECT 1 FROM stores WHERE id = ? AND is_deleted = 0", (requested_store_id,)
+        "SELECT environment FROM stores WHERE id = ? AND is_deleted = 0", (requested_store_id,)
     ).fetchone()
     if exists is None:
         abort(404)
+    if is_training_reviewer() and exists["environment"] != "training":
+        abort(403)
     return requested_store_id
 
 
-def report_scope_store_type(requested_store_type, store_id=None):
+def report_scope_environment(requested_environment, store_id=None):
     db = get_db()
-    if not is_admin():
+    if not is_environment_operator():
         row = db.execute(
-            "SELECT store_type FROM stores WHERE id = ?", (g.user["store_id"],)
+            "SELECT environment FROM stores WHERE id = ?", (g.user["store_id"],)
         ).fetchone()
-        return row["store_type"]
+        return row["environment"]
+    if is_training_reviewer():
+        return "training"
+    if requested_environment in ENVIRONMENT_LABELS:
+        return requested_environment
     if store_id:
         row = db.execute(
-            "SELECT store_type FROM stores WHERE id = ?", (store_id,)
+            "SELECT environment FROM stores WHERE id = ?", (store_id,)
         ).fetchone()
         if row is None:
             abort(404)
-        return row["store_type"]
-    return requested_store_type if requested_store_type in REPORT_SCOPE_LABELS else "normal"
+        return row["environment"]
+    return session.get("view_environment", "production")
 
 
-def store_type_values(store_type):
-    if store_type == "training":
-        return ("development", "demo")
-    if store_type in STORE_TYPE_LABELS:
-        return (store_type,)
-    return ("normal",)
+def normalize_report_store_id(store_id, environment):
+    """明示された環境と店舗が不一致なら、管理者の対象を全店舗へ戻す。"""
+    if store_id is None:
+        return None
+    row = get_db().execute(
+        "SELECT environment FROM stores WHERE id = ? AND is_deleted = 0", (store_id,)
+    ).fetchone()
+    if row is None:
+        abort(404)
+    if row["environment"] == environment:
+        return store_id
+    if is_admin():
+        return None
+    abort(403)
 
 
-def store_ids_for_scope(store_type):
-    values = store_type_values(store_type)
-    placeholders = ",".join("?" for _ in values)
+def store_ids_for_environment(environment):
     rows = get_db().execute(
-        f"SELECT id FROM stores WHERE store_type IN ({placeholders})", values
+        "SELECT id FROM stores WHERE environment = ?", (environment,)
     ).fetchall()
     return [row["id"] for row in rows] or [-1]
 
 
 def require_report_store(store_id):
-    if not is_admin() and g.user["store_id"] != store_id:
+    if is_admin():
+        return
+    if is_training_reviewer():
+        row = get_db().execute(
+            "SELECT environment FROM stores WHERE id = ?", (store_id,)
+        ).fetchone()
+        if row and row["environment"] == "training":
+            return
+        abort(403)
+    if g.user["store_id"] != store_id:
         abort(403)
 
 
-def transaction_lines(start_date=None, end_date=None, related_store_id=None, store_type=None):
+def transaction_lines(start_date=None, end_date=None, related_store_id=None, environment=None):
     db = get_db()
     conditions = []
     params = []
@@ -2118,20 +2269,15 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, sto
     if related_store_id:
         conditions.append("(o.from_store_id = ? OR o.to_store_id = ?)")
         params.extend([related_store_id, related_store_id])
-    if store_type:
-        values = store_type_values(store_type)
-        placeholders = ",".join("?" for _ in values)
-        conditions.append(
-            f"f.store_type IN ({placeholders}) AND t.store_type IN ({placeholders})"
-        )
-        params.extend(values)
-        params.extend(values)
+    if environment:
+        conditions.append("f.environment = ? AND t.environment = ?")
+        params.extend([environment, environment])
     where = " AND ".join(conditions) if conditions else "1 = 1"
     ordered_rows = db.execute(
         f"""SELECT oi.*, o.order_number, o.from_store_id, o.to_store_id,
                    o.created_at AS order_created_at, o.status AS order_status,
                    f.name AS from_store_name, t.name AS to_store_name,
-                   f.store_type AS store_type
+                   f.environment AS environment
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             JOIN stores f ON f.id = o.from_store_id
@@ -2142,7 +2288,7 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, sto
         f"""SELECT ux.*, o.order_number, o.from_store_id, o.to_store_id,
                    o.created_at AS order_created_at, o.status AS order_status,
                    f.name AS from_store_name, t.name AS to_store_name,
-                   f.store_type AS store_type
+                   f.environment AS environment
             FROM unexpected_items ux
             JOIN orders o ON o.id = ux.order_id
             JOIN stores f ON f.id = o.from_store_id
@@ -2224,7 +2370,7 @@ def make_report_line(row, line_type, line_id, product_name, major_name, sub_name
         "created_at": created_at, "date": created_at[:10], "time": created_at[11:16],
         "from_store_id": row["from_store_id"], "to_store_id": row["to_store_id"],
         "from_store_name": row["from_store_name"], "to_store_name": row["to_store_name"],
-        "store_type": row["store_type"],
+        "environment": row["environment"],
         "original_product_name": original_product_name or row["product_name"],
         "original_unit": row["unit"], "original_unit_price": ordered_price,
         "product_id": row["product_id"], "product_name": product_name,
@@ -2326,10 +2472,10 @@ def correction_history(line_type, line_id):
     return rows
 
 
-def dashboard_counts(store_id=None, store_type=None):
+def dashboard_counts(store_id=None, environment=None):
     db = get_db()
     if store_id is None:
-        store_ids = store_ids_for_scope(store_type)
+        store_ids = store_ids_for_environment(environment)
         placeholders = ",".join("?" for _ in store_ids)
         environment_sql = (
             f"o.from_store_id IN ({placeholders}) AND o.to_store_id IN ({placeholders})"
@@ -2370,7 +2516,7 @@ def dashboard_counts(store_id=None, store_type=None):
         "orders": order_count,
         "receipts": receipt_count,
         "approved": approved_count,
-        "pending": len(pending_tasks(store_id, store_type)),
+        "pending": len(pending_tasks(store_id, environment)),
     }
 
 
@@ -2392,7 +2538,7 @@ def decorate_store_orders(orders, store_id, category):
     return decorated
 
 
-def pending_tasks(store_id=None, store_type=None):
+def pending_tasks(store_id=None, environment=None):
     """商品単位で、次の操作が必要な案件を一覧化する。"""
     rows = get_db().execute(
         """SELECT 'receipt' AS task_type, oi.id AS task_id,
@@ -2462,8 +2608,8 @@ def pending_tasks(store_id=None, store_type=None):
 
            ORDER BY created_at DESC, order_id DESC, task_id"""
     ).fetchall()
-    if store_id is None and store_type:
-        allowed_store_ids = set(store_ids_for_scope(store_type))
+    if store_id is None and environment:
+        allowed_store_ids = set(store_ids_for_environment(environment))
         rows = [
             row for row in rows
             if row["from_store_id"] in allowed_store_ids

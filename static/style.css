@@ -151,9 +151,8 @@ th, td { padding: 17px 22px; border-bottom: 1px solid var(--line); }
 .button-resume { color: #07563e; background: #dcf3e9; }
 .button-danger { color: #9b3030; background: #fbe8e8; }
 .store-type-badge { display: inline-block; margin-left: 6px; padding: 3px 7px; border-radius: 999px; font-size: .68rem; font-weight: 900; white-space: nowrap; }
-.store-type-normal { color: #315d4d; background: #e4eee9; }
-.store-type-development { color: #315d83; background: #e5f0f8; }
-.store-type-demo { color: #7a5220; background: #f8ecd8; }
+.environment-production { color: #315d4d; background: #e4eee9; }
+.environment-training { color: #f6d477; background: #303948; }
 .environment-tools { margin: 18px 0 30px; padding: 24px; box-shadow: none; }
 .environment-tools h2 { margin-bottom: 8px; }
 .environment-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 18px; }
@@ -166,6 +165,18 @@ th, td { padding: 17px 22px; border-bottom: 1px solid var(--line); }
 .reset-card { max-width: 680px; margin: 0 auto; padding: clamp(24px, 5vw, 44px); }
 .reset-warning { margin: 24px 0; padding: 18px 20px; color: #8d3028; background: #fff0eb; border: 1px solid #e6bdb2; border-radius: 12px; }
 .reset-warning p { margin: 5px 0; }
+.training-banner { padding: 9px 16px; color: #171b22; background: #f6c945; text-align: center; font-weight: 1000; letter-spacing: .12em; }
+body.training-mode { --ink: #edf3f7; --muted: #a9b5c0; --paper: #11161d; --card: #1b232d; --line: #394553; --green: #60d4aa; --green-dark: #96edcd; --lime: #f6c945; --error: #ff9c9c; --shadow: 0 14px 40px rgba(0,0,0,.28); color-scheme: dark; }
+.training-mode .site-header, .training-mode footer { background: #171e27; border-color: #394553; }
+.training-mode .brand, .training-mode nav a, .training-mode .login-status, .training-mode .login-status button { color: #edf3f7; }
+.training-mode .card, .training-mode .status-card, .training-mode .order-card, .training-mode .store-table-card, .training-mode .table-card, .training-mode .account-row, .training-mode .master-row, .training-mode .managed-product-card, .training-mode .receipt-row, .training-mode .exception-card, .training-mode .pending-card { color: var(--ink); background: #1b232d; border-color: #394553; }
+.training-mode input, .training-mode select, .training-mode textarea { color: #edf3f7; background: #111820; border-color: #536171; }
+.training-mode option { color: #edf3f7; background: #111820; }
+.training-mode .status-card-approved, .training-mode .logged-store-panel, .training-mode .management-links a, .training-mode .environment-view-label { color: #c7f5e4; background: #193329; border-color: #315e4d; }
+.training-mode .status-card-pending, .training-mode .reset-warning, .training-mode .sender-approval-card { color: #ffd0c7; background: #38231f; border-color: #75473e; }
+.training-mode .status-tabs, .training-mode .small-button { background: #27313d; color: #edf3f7; }
+.training-mode .status-tabs a.active { background: #111820; color: #f6d477; }
+.training-mode .product-thumb, .training-mode .photo-preview, .training-mode .radio-choice span { background: #26313c; color: #c1ccd5; }
 .edit-card { max-width: 650px; margin: 0 auto; padding: clamp(24px, 5vw, 44px); }
 .edit-card h1 { font-size: clamp(1.8rem, 5vw, 2.7rem); margin-bottom: 30px; }
 .order-total .status-badge { display: inline-block; margin-bottom: 7px; }

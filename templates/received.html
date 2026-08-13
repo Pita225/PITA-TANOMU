@@ -2,7 +2,7 @@
 {% block title %}受注一覧 | PITA_タノム{% endblock %}
 {% block content %}
 <div class="page-head"><div><span class="eyebrow">RECEIVED ORDERS</span><h1>届いた発注</h1></div></div>
-{% if g.user.role == 'admin' %}<form class="card receive-filter" method="get">
+{% if environment_operator %}<form class="card receive-filter" method="get">
   <label><span>確認する店舗</span><select name="store_id" required onchange="this.form.submit()">
     <option value="">店舗を選択してください</option>
     {% for store in stores %}<option value="{{ store.id }}" {% if selected_store and selected_store.id == store.id %}selected{% endif %}>{{ store.name }}{% if not store.is_active %}（停止中）{% endif %}</option>{% endfor %}

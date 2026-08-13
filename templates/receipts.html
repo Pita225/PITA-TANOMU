@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-head"><div><span class="eyebrow">RECEIPT CONFIRMATION</span><h1>受取確認</h1></div></div>
 <p class="lead">発注した商品が届いたら、実際の数量を確認して承認します。</p>
-{% if g.user.role == 'admin' %}<form class="card receive-filter" method="get">
+{% if environment_operator %}<form class="card receive-filter" method="get">
   <label><span>受け取る店舗（発注元）</span><select name="store_id" required onchange="this.form.submit()">
     <option value="">店舗を選択してください</option>
     {% for store in stores %}<option value="{{ store.id }}" {% if selected_store and selected_store.id == store.id %}selected{% endif %}>{{ store.name }}{% if not store.is_active %}（停止中）{% endif %}</option>{% endfor %}

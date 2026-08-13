@@ -3,12 +3,12 @@
 {% block content %}
 <section class="dashboard-section">
   <div class="section-heading"><div><span class="eyebrow">ORDER STATUS</span><h1>発注状況</h1></div><span>現在の登録データ</span></div>
-  {% if g.user.role == 'admin' %}<form class="card environment-filter" method="get"><label><span>表示中の環境</span><select name="store_type" onchange="this.form.submit()">{% for value, label in report_scopes.items() %}<option value="{{ value }}" {% if selected_store_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><noscript><button class="button button-primary" type="submit">表示</button></noscript></form>{% endif %}
-  <div class="status-grid {% if g.user.role == 'store' %}store-status-grid{% endif %}">
-    <a class="status-card status-card-orders" id="status-orders" data-count="{{ counts.orders }}" href="{{ url_for('status_list', category='orders', store_type=selected_store_type) }}"><span>発注</span><strong>{{ counts.orders }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}選択環境の発注{% else %}自店舗からの発注{% endif %}</p></a>
-    <a class="status-card status-card-receipts" id="status-receipts" data-count="{{ counts.receipts }}" href="{{ url_for('status_list', category='receipts', store_type=selected_store_type) }}"><span>受取</span><strong>{{ counts.receipts }}<small>件</small></strong><p>{% if g.user.role == 'admin' %}選択環境の受取報告済み{% else %}自店舗が受取先{% endif %}</p></a>
-    <a class="status-card status-card-approved" id="status-approved" data-count="{{ counts.approved }}" href="{{ url_for('status_list', category='approved', store_type=selected_store_type) }}"><span>承認済</span><strong>{{ counts.approved }}<small>件</small></strong><p>全処理が完了</p></a>
-    {% if g.user.role == 'admin' %}<a class="status-card status-card-pending {% if counts.pending %}has-pending{% endif %}" id="status-pending" data-count="{{ counts.pending }}" href="{{ url_for('status_list', category='pending', store_type=selected_store_type) }}"><span>未承認</span><strong>{{ counts.pending }}<small>件</small></strong><p>未完了・確認待ち</p></a>{% endif %}
+  {% if system_admin %}<form class="card environment-filter" method="get"><label><span>表示中の環境</span><select name="environment" onchange="this.form.submit()">{% for value, label in environments.items() %}<option value="{{ value }}" {% if selected_environment == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><noscript><button class="button button-primary" type="submit">表示</button></noscript></form>{% elif training_reviewer %}<div class="environment-view-label">表示中：<strong>トレーニング</strong></div>{% endif %}
+  <div class="status-grid {% if not environment_operator %}store-status-grid{% endif %}">
+    <a class="status-card status-card-orders" id="status-orders" data-count="{{ counts.orders }}" href="{{ url_for('status_list', category='orders', environment=selected_environment) }}"><span>発注</span><strong>{{ counts.orders }}<small>件</small></strong><p>{% if environment_operator %}選択環境の発注{% else %}自店舗からの発注{% endif %}</p></a>
+    <a class="status-card status-card-receipts" id="status-receipts" data-count="{{ counts.receipts }}" href="{{ url_for('status_list', category='receipts', environment=selected_environment) }}"><span>受取</span><strong>{{ counts.receipts }}<small>件</small></strong><p>{% if environment_operator %}選択環境の受取報告済み{% else %}自店舗が受取先{% endif %}</p></a>
+    <a class="status-card status-card-approved" id="status-approved" data-count="{{ counts.approved }}" href="{{ url_for('status_list', category='approved', environment=selected_environment) }}"><span>承認済</span><strong>{{ counts.approved }}<small>件</small></strong><p>全処理が完了</p></a>
+    {% if environment_operator %}<a class="status-card status-card-pending {% if counts.pending %}has-pending{% endif %}" id="status-pending" data-count="{{ counts.pending }}" href="{{ url_for('status_list', category='pending', environment=selected_environment) }}"><span>未承認</span><strong>{{ counts.pending }}<small>件</small></strong><p>未完了・確認待ち</p></a>{% endif %}
   </div>
 </section>
 
@@ -23,10 +23,10 @@
   <div class="store-grid">
     <label>
       <span>発注元店舗</span>
-      {% if g.user.role == 'admin' %}
+      {% if environment_operator %}
       <select id="from-store" name="from_store_id" required>
         <option value="">選択してください</option>
-        {% for store in stores %}<option value="{{ store.id }}" data-store-type="{{ store.store_type }}">{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}
+        {% for store in stores %}<option value="{{ store.id }}" data-environment="{{ store.environment }}">{{ store.name }}［{{ store.environment|environment_label }}］</option>{% endfor %}
       </select>
       {% else %}
       <select id="from-store" disabled><option value="{{ g.user.store_id }}" selected>{{ g.user.store_name }}（ログイン店舗）</option></select>
@@ -37,13 +37,13 @@
       <span>発注先店舗</span>
       <select id="to-store" name="to_store_id" required>
         <option value="">選択してください</option>
-        {% for store in stores %}<option value="{{ store.id }}" data-store-type="{{ store.store_type }}">{{ store.name }}［{{ store.store_type|store_type_label }}］</option>{% endfor %}
+        {% for store in stores %}<option value="{{ store.id }}" data-environment="{{ store.environment }}">{{ store.name }}［{{ store.environment|environment_label }}］</option>{% endfor %}
       </select>
     </label>
   </div>
   <button class="button button-primary button-wide" type="submit">商品を選ぶ</button>
 </form>
-{% if (g.user.role == 'admin' and stores|length < 2) or (g.user.role == 'store' and stores|length < 1) %}
+{% if (environment_operator and stores|length < 2) or (not environment_operator and stores|length < 1) %}
 <p class="form-note error-note">発注には有効な店舗が2店舗以上必要です。店舗管理から追加または再開してください。</p>
 {% endif %}
 <script>
@@ -52,7 +52,7 @@
   function preventSameStore(source, target) {
     [...target.options].forEach(option => {
       const differentType = source.value && option.value &&
-        source.selectedOptions[0].dataset.storeType !== option.dataset.storeType;
+        source.selectedOptions[0].dataset.environment !== option.dataset.environment;
       option.disabled = option.value !== '' && (option.value === source.value || differentType);
     });
     if (target.selectedOptions[0] && target.selectedOptions[0].disabled) target.value = '';

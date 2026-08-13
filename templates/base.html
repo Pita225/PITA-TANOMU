@@ -6,17 +6,18 @@
   <title>{% block title %}PITA_タノム{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body class="{% if training_mode %}training-mode{% endif %}">
+  {% if training_mode %}<div class="training-banner" role="status">トレーニング環境</div>{% endif %}
   <header class="site-header">
     <a class="brand" href="{{ url_for('index') }}">PITA_タノム</a>
     {% if g.user %}
     <nav aria-label="メインメニュー">
-      {% if g.user.role == 'admin' %}
+      {% if environment_operator %}
       <a href="{{ url_for('index') }}">発注する</a>
       <a href="{{ url_for('received') }}">受注を確認</a>
       <a href="{{ url_for('receipts') }}">受取確認</a>
       <a href="{{ url_for('reports') }}">集計</a>
-      <a href="{{ url_for('product_management') }}">商品管理</a><a href="{{ url_for('stores') }}">店舗管理</a><a href="{{ url_for('accounts') }}">アカウント</a>
+      {% if system_admin %}<a href="{{ url_for('product_management') }}">商品管理</a><a href="{{ url_for('stores') }}">店舗管理</a><a href="{{ url_for('accounts') }}">アカウント</a>{% endif %}
       {% else %}
       <a href="{{ url_for('status_list', category='orders') }}">発注</a>
       <a href="{{ url_for('status_list', category='receipts') }}">受取</a>
@@ -24,7 +25,7 @@
       <a href="{{ url_for('reports') }}">集計</a>
       {% endif %}
     </nav>
-    <div class="login-status"><span>ログイン中：<strong>{% if g.user.role == 'admin' %}管理者{% else %}{{ g.user.store_name }}{% endif %}</strong></span><form action="{{ url_for('logout') }}" method="post"><button type="submit">ログアウト</button></form></div>
+    <div class="login-status"><span>ログイン中：<strong>{% if training_reviewer %}社長確認用{% elif system_admin %}管理者{% else %}{{ g.user.store_name }}{% endif %}</strong></span><form action="{{ url_for('logout') }}" method="post"><button type="submit">ログアウト</button></form></div>
     {% endif %}
   </header>
   <main class="container">
