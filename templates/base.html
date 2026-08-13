@@ -17,7 +17,7 @@
       <a href="{{ url_for('received') }}">受注を確認</a>
       <a href="{{ url_for('receipts') }}">受取確認</a>
       <a href="{{ url_for('reports') }}">集計</a>
-      {% if system_admin %}<a href="{{ url_for('product_management') }}">商品管理</a><a href="{{ url_for('stores') }}">店舗管理</a><a href="{{ url_for('accounts') }}">アカウント</a>{% endif %}
+      <a href="{{ url_for('product_management') }}">商品管理</a>{% if system_admin %}<a href="{{ url_for('stores') }}">店舗管理</a><a href="{{ url_for('accounts') }}">アカウント</a>{% endif %}
       {% else %}
       <a href="{{ url_for('status_list', category='orders') }}">発注</a>
       <a href="{{ url_for('status_list', category='receipts') }}">受取</a>

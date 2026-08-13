@@ -43,6 +43,8 @@ CREATE TABLE product_categories (
     name TEXT NOT NULL,
     level INTEGER NOT NULL,
     parent_id INTEGER,
+    environment TEXT NOT NULL DEFAULT 'production'
+        CHECK (environment IN ('production', 'training')),
     is_active INTEGER NOT NULL DEFAULT 1,
     is_deleted INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (parent_id) REFERENCES product_categories (id),
@@ -52,9 +54,13 @@ CREATE TABLE product_categories (
 
 CREATE TABLE units (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    environment TEXT NOT NULL DEFAULT 'production'
+        CHECK (environment IN ('production', 'training')),
+    decimal_places INTEGER NOT NULL DEFAULT 0 CHECK (decimal_places BETWEEN 0 AND 2),
     is_active INTEGER NOT NULL DEFAULT 1,
-    is_deleted INTEGER NOT NULL DEFAULT 0
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (name, environment)
 );
 
 CREATE TABLE products (
@@ -66,12 +72,16 @@ CREATE TABLE products (
     unit TEXT NOT NULL,
     unit_price INTEGER,
     image_filename TEXT,
+    environment TEXT NOT NULL DEFAULT 'production'
+        CHECK (environment IN ('production', 'training')),
+    source_product_id INTEGER,
     display_order INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
     is_deleted INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (major_category_id) REFERENCES product_categories (id),
     FOREIGN KEY (subcategory_id) REFERENCES product_categories (id),
     FOREIGN KEY (unit_id) REFERENCES units (id),
+    FOREIGN KEY (source_product_id) REFERENCES products (id),
     CHECK (unit_price IS NULL OR unit_price >= 0)
 );
 
@@ -97,8 +107,12 @@ CREATE TABLE order_items (
     product_name TEXT NOT NULL,
     unit TEXT NOT NULL,
     quantity REAL NOT NULL,
+    quantity_minor INTEGER,
+    quantity_decimal_places INTEGER NOT NULL DEFAULT 0 CHECK (quantity_decimal_places BETWEEN 0 AND 2),
     received_quantity REAL,
+    received_quantity_minor INTEGER,
     final_received_quantity REAL,
+    final_received_quantity_minor INTEGER,
     unit_price INTEGER,
     major_category_name TEXT,
     subcategory_name TEXT,
@@ -117,9 +131,12 @@ CREATE TABLE unexpected_items (
     product_name TEXT NOT NULL,
     unit TEXT NOT NULL,
     arrived_quantity REAL NOT NULL,
+    arrived_quantity_minor INTEGER,
+    quantity_decimal_places INTEGER NOT NULL DEFAULT 0 CHECK (quantity_decimal_places BETWEEN 0 AND 2),
     decision TEXT NOT NULL,
     status TEXT NOT NULL,
     final_received_quantity REAL,
+    final_received_quantity_minor INTEGER,
     unit_price INTEGER,
     major_category_name TEXT,
     subcategory_name TEXT,
@@ -145,6 +162,7 @@ CREATE TABLE transaction_corrections (
     corrected_subcategory_name TEXT NOT NULL,
     corrected_unit TEXT NOT NULL,
     corrected_quantity REAL NOT NULL,
+    corrected_quantity_minor INTEGER,
     corrected_unit_price INTEGER,
     reason TEXT NOT NULL,
     before_json TEXT NOT NULL,
@@ -161,3 +179,49 @@ CREATE TABLE transaction_corrections (
 
 CREATE INDEX idx_corrections_line ON transaction_corrections (line_type, line_id, id DESC);
 CREATE INDEX idx_corrections_order ON transaction_corrections (order_id, id DESC);
+
+CREATE TRIGGER fill_order_item_quantity_minor AFTER INSERT ON order_items
+WHEN NEW.quantity_minor IS NULL BEGIN
+    UPDATE order_items SET quantity_minor = CAST(ROUND(NEW.quantity * 100) AS INTEGER),
+        received_quantity_minor = CASE WHEN NEW.received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.received_quantity * 100) AS INTEGER) END,
+        final_received_quantity_minor = CASE WHEN NEW.final_received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.final_received_quantity * 100) AS INTEGER) END
+    WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER fill_unexpected_quantity_minor AFTER INSERT ON unexpected_items
+WHEN NEW.arrived_quantity_minor IS NULL BEGIN
+    UPDATE unexpected_items SET arrived_quantity_minor = CAST(ROUND(NEW.arrived_quantity * 100) AS INTEGER),
+        final_received_quantity_minor = CASE WHEN NEW.final_received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.final_received_quantity * 100) AS INTEGER) END
+    WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER fill_correction_quantity_minor AFTER INSERT ON transaction_corrections
+WHEN NEW.corrected_quantity_minor IS NULL BEGIN
+    UPDATE transaction_corrections SET corrected_quantity_minor = CAST(ROUND(NEW.corrected_quantity * 100) AS INTEGER)
+    WHERE id = NEW.id;
+END;
+
+CREATE TABLE audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    user_id INTEGER NOT NULL,
+    user_login_id TEXT NOT NULL,
+    store_id INTEGER,
+    store_name TEXT,
+    order_id INTEGER,
+    order_number TEXT,
+    event_type TEXT NOT NULL,
+    product_name TEXT,
+    quantity_minor INTEGER,
+    before_json TEXT,
+    after_json TEXT,
+    approval_status TEXT,
+    environment TEXT NOT NULL CHECK (environment IN ('production', 'training')),
+    snapshot_path TEXT,
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    FOREIGN KEY (store_id) REFERENCES stores (id),
+    FOREIGN KEY (order_id) REFERENCES orders (id)
+);
+
+CREATE INDEX idx_audit_events_search
+    ON audit_events (store_id, occurred_at, event_type, order_id);

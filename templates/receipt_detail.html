@@ -26,7 +26,7 @@
       <div class="receipt-product"><span class="item-kind">注文商品</span><h2>{{ item.product_name }}</h2><p>発注数量 <strong>{{ item.quantity|quantity }} {{ item.unit }}</strong>{% if item.unit_price is not none %} ・ {{ item.unit_price|yen }} / {{ item.unit }} ・ {{ (item.quantity * item.unit_price)|yen }}{% endif %}</p></div>
       <div class="receipt-arrow" aria-hidden="true">→</div>
       {% if order.status == 'ordered' and can_receive_action %}
-      <label class="received-input"><span>実際に届いた数量</span><div><input name="received_quantity_{{ item.id }}" type="number" min="0" max="99999" step="any" inputmode="decimal" value="{{ item.quantity|quantity }}" required><b>{{ item.unit }}</b></div></label>
+      <label class="received-input"><span>実際に届いた数量</span><div><input name="received_quantity_{{ item.id }}" type="number" min="0" max="99999" step="{{ '1' if item.quantity_decimal_places == 0 else ('0.1' if item.quantity_decimal_places == 1 else '0.01') }}" inputmode="{{ 'numeric' if item.quantity_decimal_places == 0 else 'decimal' }}" value="{{ item.quantity|quantity }}" required><b>{{ item.unit }}</b></div></label>
       {% elif order.status != 'ordered' %}
       <div class="received-result"><span>実際に届いた数量</span><strong>{{ item.received_quantity|quantity }} {{ item.unit }}</strong>{% if item.received_quantity != item.quantity %}<small class="difference">数量差異 {{ (item.received_quantity - item.quantity)|quantity }} {{ item.unit }}</small>{% endif %}{% if item.final_received_quantity is not none %}<small class="final-quantity">最終受取 {{ item.final_received_quantity|quantity }} {{ item.unit }}</small>{% else %}<small>送付元確認待ち</small>{% endif %}</div>
       {% else %}<div class="received-result"><span>現在の状態</span><strong>受取店舗の確認待ち</strong></div>
@@ -44,7 +44,7 @@
       <article class="unexpected-form-row">
         <label><span>届いた商品</span><select data-field="product" required disabled>
           <option value="">商品を選択</option>
-          {% for product in products %}{% if product.id not in ordered_product_ids %}<option value="{{ product.id }}" data-unit="{{ product.unit }}">{{ product.name }}（{{ product.unit }}）</option>{% endif %}{% endfor %}
+          {% for product in products %}{% if product.id not in ordered_product_ids %}<option value="{{ product.id }}" data-unit="{{ product.unit }}" data-decimals="{{ product.decimal_places }}">{{ product.name }}（{{ product.unit }}）</option>{% endif %}{% endfor %}
         </select></label>
         <label><span>届いた数量</span><div class="unit-input"><input data-field="quantity" type="number" min="0.000001" max="99999" step="any" inputmode="decimal" required disabled><b data-unit-label>単位</b></div></label>
         <fieldset><legend>対応</legend><label class="radio-choice"><input data-field="decision" type="radio" value="return" required disabled><span>返品する</span></label><label class="radio-choice"><input data-field="decision" type="radio" value="accept" required disabled><span>受け取る（送付元確認）</span></label></fieldset>
@@ -94,7 +94,11 @@
     quantity.name = `unexpected_quantity_${index}`; quantity.disabled = false;
     decisions.forEach(input => { input.name = `unexpected_decision_${index}`; input.disabled = false; });
     product.addEventListener('change', () => {
-      row.querySelector('[data-unit-label]').textContent = product.selectedOptions[0]?.dataset.unit || '単位';
+      const option = product.selectedOptions[0];
+      const decimals = Number(option?.dataset.decimals || 0);
+      row.querySelector('[data-unit-label]').textContent = option?.dataset.unit || '単位';
+      quantity.step = decimals === 0 ? '1' : (decimals === 1 ? '0.1' : '0.01');
+      quantity.inputMode = decimals === 0 ? 'numeric' : 'decimal';
     });
     row.querySelector('.remove-extra').addEventListener('click', () => row.remove());
     rows.appendChild(fragment);

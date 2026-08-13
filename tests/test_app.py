@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import csv
 import io
+import os
 import time
 from datetime import date
 from io import BytesIO
@@ -12,8 +13,12 @@ from unittest import mock
 from itsdangerous import URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
+# Importing app exposes the WSGI application. Point that module-level instance
+# at memory so test discovery can never migrate the real configured database.
+os.environ["PITA_DATABASE"] = ":memory:"
 from app import ADMIN_RECOVERY_SALT, create_app, init_db, migrate_db
 from admin_recovery import create_recovery_token
+from backup_service import run_backup
 
 
 class OrderFlowTestCase(unittest.TestCase):
@@ -1402,7 +1407,12 @@ class OrderFlowTestCase(unittest.TestCase):
         self.assertEqual(connection.execute(
             "SELECT COUNT(*) FROM orders o JOIN stores f ON f.id=o.from_store_id WHERE f.environment='training'"
         ).fetchone()[0], 0)
-        self.assertEqual(connection.execute("SELECT COUNT(*) FROM products").fetchone()[0], 6)
+        self.assertEqual(connection.execute(
+            "SELECT COUNT(*) FROM products WHERE environment = 'production'"
+        ).fetchone()[0], 6)
+        self.assertEqual(connection.execute(
+            "SELECT COUNT(*) FROM products WHERE environment = 'training'"
+        ).fetchone()[0], 6)
         self.assertEqual(connection.execute(
             "SELECT COUNT(*) FROM users WHERE login_id IN ('training-a','training-b','president-review-new')"
         ).fetchone()[0], 3)
@@ -1581,6 +1591,198 @@ class OrderFlowTestCase(unittest.TestCase):
         ).fetchone()[0], 2)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM products").fetchone()[0], 6)
         connection.close()
+
+
+    def test_reviewer_training_master_isolation_and_decimal_end_to_end(self):
+        self.client.post("/stores/provision/training")
+        connection = sqlite3.connect(self.database)
+        training_stores = connection.execute(
+            "SELECT id, name FROM stores WHERE environment='training' ORDER BY id"
+        ).fetchall()
+        production_before = connection.execute(
+            "SELECT name, unit_price, major_category_id, subcategory_id, unit_id, image_filename FROM products WHERE id=1"
+        ).fetchone()
+        connection.close()
+        for index, (store_id, _name) in enumerate(training_stores[:2], 1):
+            self.client.post("/accounts", data={
+                "store_id": store_id, "login_id": f"training-decimal-{index}",
+                "password": "training-decimal-pass",
+            })
+        self.client.post("/accounts/training-reviewer", data={
+            "login_id": "president-decimal", "password": "president-decimal-pass",
+        })
+        self.client.post("/logout")
+        self.client.post("/login", data={
+            "login_id": "president-decimal", "password": "president-decimal-pass",
+        })
+
+        self.assertEqual(self.client.get("/product-management").status_code, 200)
+        self.assertEqual(self.client.get("/stores").status_code, 403)
+        self.assertEqual(self.client.get("/accounts").status_code, 403)
+        self.assertEqual(self.client.get("/product-management/1/edit").status_code, 404)
+        self.assertEqual(self.client.get("/?environment=production").status_code, 200)
+        self.assertIn("training-mode", self.client.get("/").get_data(as_text=True))
+
+        self.client.post("/categories/add", data={"name": "練習大分類", "level": "1"})
+        connection = sqlite3.connect(self.database)
+        major_id = connection.execute(
+            "SELECT id FROM product_categories WHERE name='練習大分類' AND environment='training'"
+        ).fetchone()[0]
+        connection.close()
+        self.client.post("/categories/add", data={
+            "name": "練習中分類", "level": "2", "parent_id": major_id,
+        })
+        self.client.post("/units/add", data={
+            "name": "練習kg", "decimal_places": "2",
+        })
+        connection = sqlite3.connect(self.database)
+        sub_id = connection.execute(
+            "SELECT id FROM product_categories WHERE name='練習中分類' AND environment='training'"
+        ).fetchone()[0]
+        unit_id = connection.execute(
+            "SELECT id FROM units WHERE name='練習kg' AND environment='training'"
+        ).fetchone()[0]
+        connection.close()
+        self.client.post("/product-management/new", data={
+            "name": "練習商品", "major_category_id": major_id,
+            "subcategory_id": sub_id, "unit_id": unit_id, "unit_price": "777",
+        })
+        connection = sqlite3.connect(self.database)
+        training_product = connection.execute(
+            "SELECT id FROM products WHERE name='練習商品' AND environment='training'"
+        ).fetchone()[0]
+        connection.close()
+        self.client.post(f"/product-management/{training_product}/edit", data={
+            "name": "練習商品編集済", "major_category_id": major_id,
+            "subcategory_id": sub_id, "unit_id": unit_id, "unit_price": "888",
+        })
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute(
+            "SELECT unit_price FROM products WHERE id=?", (training_product,)
+        ).fetchone()[0], 888)
+        self.assertEqual(connection.execute(
+            "SELECT name, unit_price, major_category_id, subcategory_id, unit_id, image_filename FROM products WHERE id=1"
+        ).fetchone(), production_before)
+        kg_training = connection.execute(
+            "SELECT id FROM products WHERE source_product_id=1 AND environment='training'"
+        ).fetchone()[0]
+        other_kg_training = connection.execute(
+            "SELECT id FROM products WHERE source_product_id=2 AND environment='training'"
+        ).fetchone()[0]
+        connection.close()
+
+        from_id, to_id = training_stores[0][0], training_stores[1][0]
+        self.client.post("/order/start", data={"from_store_id": from_id, "to_store_id": to_id})
+        self.client.post("/cart", data={f"quantity_{kg_training}": "0.25"})
+        self.client.post("/order/submit")
+        connection = sqlite3.connect(self.database)
+        order_id, item_id = connection.execute(
+            "SELECT o.id, oi.id FROM orders o JOIN order_items oi ON oi.order_id=o.id ORDER BY o.id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(connection.execute(
+            "SELECT quantity_minor FROM order_items WHERE id=?", (item_id,)
+        ).fetchone()[0], 25)
+        connection.close()
+        self.client.post(f"/receipts/{order_id}", data={
+            f"received_quantity_{item_id}": "1.50",
+            "unexpected_product_0": str(other_kg_training),
+            "unexpected_quantity_0": "0.25", "unexpected_decision_0": "return",
+        })
+        connection = sqlite3.connect(self.database)
+        unexpected_id = connection.execute(
+            "SELECT id FROM unexpected_items WHERE order_id=?", (order_id,)
+        ).fetchone()[0]
+        self.assertEqual(connection.execute(
+            "SELECT received_quantity_minor FROM order_items WHERE id=?", (item_id,)
+        ).fetchone()[0], 150)
+        self.assertEqual(connection.execute(
+            "SELECT arrived_quantity_minor FROM unexpected_items WHERE id=?", (unexpected_id,)
+        ).fetchone()[0], 25)
+        connection.close()
+        self.client.post(f"/receipts/{order_id}/unexpected/{unexpected_id}/returned")
+        self.client.post(f"/received/{order_id}/approve")
+        self.client.post(f"/received/{order_id}/unexpected/{unexpected_id}/complete-return")
+        today = date.today().isoformat()
+        self.client.post(
+            f"/reports/correct/order_item/{item_id}",
+            data={"product_id": kg_training, "quantity": "1.25", "unit_price": "1280", "reason": "小数数量訂正テスト"},
+        )
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute(
+            "SELECT corrected_quantity_minor FROM transaction_corrections WHERE line_id=? ORDER BY id DESC", (item_id,)
+        ).fetchone()[0], 125)
+        connection.close()
+        daily = self.client.get(f"/reports/daily?date={today}").get_data(as_text=True)
+        monthly = self.client.get(f"/reports?month={today[:7]}").get_data(as_text=True)
+        exported = self.client.get(
+            f"/reports/csv?direction=receipts&start_date={today}&end_date={today}"
+        ).data.decode("utf-8-sig")
+        self.assertIn("1.25", daily)
+        self.assertIn("1.25", monthly)
+        self.assertIn("1.25", exported)
+
+    def test_disabled_backup_and_audit_are_strict_noops(self):
+        backup_path = Path(self.temp_dir.name) / "disabled-backups"
+        audit_path = Path(self.temp_dir.name) / "disabled-audit"
+        config = {
+            "BACKUP_ENABLED": "false", "DATABASE": self.database,
+            "BACKUP_STORAGE_PATH": str(backup_path), "BACKUP_BACKEND": "sqlite",
+        }
+        with mock.patch("backup_service.SQLiteBackupService") as service:
+            self.assertIsNone(run_backup(config))
+            service.assert_not_called()
+        self.assertFalse(backup_path.exists())
+
+        self.app.config.update({
+            "AUDIT_SNAPSHOT_ENABLED": "false", "AUDIT_STORAGE_PATH": str(audit_path),
+        })
+        with mock.patch("app.record_audit") as recorder:
+            self.client.post("/order/start", data={"from_store_id": 1, "to_store_id": 2})
+            self.client.post("/cart", data={"quantity_1": "0.25"})
+            self.client.post("/order/submit")
+            recorder.assert_not_called()
+        self.assertFalse(audit_path.exists())
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT quantity_minor FROM order_items ORDER BY id DESC").fetchone()[0], 25)
+        connection.close()
+
+    def test_enabled_sqlite_backup_uses_consistent_db_and_csv_exports(self):
+        backup_path = Path(self.temp_dir.name) / "enabled-backups"
+        destination = run_backup({
+            "BACKUP_ENABLED": "true", "DATABASE": self.database,
+            "BACKUP_STORAGE_PATH": str(backup_path), "BACKUP_BACKEND": "sqlite",
+        })
+        self.assertTrue((destination / "pita_tanom.sqlite3").is_file())
+        self.assertTrue((destination / "csv" / "stores.csv").is_file())
+        connection = sqlite3.connect(destination / "pita_tanom.sqlite3")
+        self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM stores").fetchone()[0], 3)
+        connection.close()
+
+    def test_enabled_audit_writes_searchable_event_and_html_snapshot(self):
+        audit_path = Path(self.temp_dir.name) / "audit-enabled"
+        self.app.config.update({
+            "AUDIT_SNAPSHOT_ENABLED": "true", "AUDIT_STORAGE_PATH": str(audit_path),
+        })
+        self.client.post("/order/start", data={"from_store_id": 1, "to_store_id": 2})
+        self.client.post("/cart", data={"quantity_1": "0.25"})
+        self.client.post("/order/submit")
+        connection = sqlite3.connect(self.database)
+        event = connection.execute(
+            """SELECT event_type, user_login_id, store_name, order_number,
+                      product_name, quantity_minor, approval_status, snapshot_path
+               FROM audit_events ORDER BY id DESC"""
+        ).fetchone()
+        connection.close()
+        self.assertEqual(event[:7], (
+            "order_confirmed", "admin", "本店", "ORD-000001",
+            "国産鶏もも肉", 25, "ordered",
+        ))
+        snapshot = Path(event[7])
+        self.assertTrue(snapshot.is_file())
+        self.assertIn("本店", snapshot.read_text(encoding="utf-8"))
+        self.assertIn(str(audit_path), str(snapshot))
 
 
 if __name__ == "__main__":

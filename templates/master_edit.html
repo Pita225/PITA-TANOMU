@@ -2,5 +2,12 @@
 {% block title %}{{ master_name }}を編集 | PITA_タノム{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ url_for(back_endpoint) }}">← {{ master_name }}管理に戻る</a>
-<section class="card edit-card"><span class="eyebrow">EDIT MASTER</span><h1>{{ master_name }}を編集</h1><form method="post"><label><span>{{ master_name }}名</span><input name="name" maxlength="50" required value="{{ item.name }}"></label><div class="action-bar"><a class="button button-secondary" href="{{ url_for(back_endpoint) }}">キャンセル</a><button class="button button-primary" type="submit">変更を保存</button></div></form></section>
+<section class="card edit-card">
+  <span class="eyebrow">EDIT MASTER</span><h1>{{ master_name }}を編集</h1>
+  <form method="post">
+    <label><span>{{ master_name }}名</span><input name="name" maxlength="50" required value="{{ item.name }}"></label>
+    {% if master_name == '単位' %}<label><span>数量の小数桁</span><select name="decimal_places"><option value="0" {% if item.decimal_places == 0 %}selected{% endif %}>整数のみ</option><option value="1" {% if item.decimal_places == 1 %}selected{% endif %}>小数第1位</option><option value="2" {% if item.decimal_places == 2 %}selected{% endif %}>小数第2位</option></select></label>{% endif %}
+    <div class="action-bar"><a class="button button-secondary" href="{{ url_for(back_endpoint) }}">キャンセル</a><button class="button button-primary" type="submit">変更を保存</button></div>
+  </form>
+</section>
 {% endblock %}

@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-head report-head">
   <div><span class="eyebrow">MONTHLY REPORT</span><h1>月次集計</h1><p class="lead">発注・受注の金額と商品内訳を月単位で確認できます。</p></div>
-  {% if system_admin %}<a class="small-button" href="{{ url_for('report_corrections') }}">訂正履歴</a>{% endif %}
+  {% if business_admin %}<a class="small-button" href="{{ url_for('report_corrections') }}">訂正履歴</a>{% endif %}
 </div>
 
 <form class="card report-filter" method="get">

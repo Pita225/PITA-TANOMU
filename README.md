@@ -56,3 +56,17 @@ flask --app app init-db
 ```powershell
 python -m unittest discover -s tests -v
 ```
+# トレーニング分離・小数数量・保全機能
+
+商品・分類・単位には `production` / `training` の環境スコープがあります。既存商品は安全な起動時マイグレーションで本番として保持され、別IDのトレーニング用マスタが一度だけ複製されます。社長確認用アカウントはトレーニング側の業務管理（商品、分類、単位、発注、受取、承認、訂正、集計、CSV）を操作できますが、本番データ、店舗管理、アカウント管理、トレーニングリセットにはアクセスできません。
+
+単位ごとに数量の小数桁を0～2で設定できます。数量は互換表示用の値に加えて100倍の整数を正本として保存し、受取差異判定・返品・訂正・集計・CSVで固定小数として扱います。`kg` の初期値は小数第2位、その他の既存単位は整数です。
+
+バックアップと監査スナップショットは初期値が完全OFFです。
+
+```env
+BACKUP_ENABLED=false
+AUDIT_SNAPSHOT_ENABLED=false
+```
+
+将来有効化する場合は、永続ディスク等を指す `BACKUP_STORAGE_PATH` と `AUDIT_STORAGE_PATH` を設定し、`BACKUP_ENABLED=true` / `AUDIT_SNAPSHOT_ENABLED=true` にします。SQLiteバックアップは `flask backup` からSQLite Backup API、整合性検査、重要テーブルのUTF-8 BOM付きCSV出力を実行します。監査は重要操作をDB検索可能な構造化行として保存し、店舗／年／月／操作種別のHTMLスナップショットも生成します。保存物には個人情報・認証情報が含まれ得るためGitへ追加しないでください。

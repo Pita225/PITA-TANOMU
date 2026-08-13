@@ -28,6 +28,10 @@ uploads/
 media/
 instance/
 var/
+backups/
+local_backups/
+audit_snapshots/
+audit/
 
 # Python virtual environments
 .venv/

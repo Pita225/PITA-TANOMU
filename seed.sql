@@ -6,7 +6,7 @@ INSERT INTO stores (name) VALUES
 INSERT INTO product_categories (name, level) VALUES ('未分類', 1);
 INSERT INTO product_categories (name, level, parent_id) VALUES ('未分類', 2, 1);
 
-INSERT INTO units (name) VALUES ('kg'), ('個'), ('本'), ('袋');
+INSERT INTO units (name, decimal_places) VALUES ('kg', 2), ('個', 0), ('本', 0), ('袋', 0);
 
 INSERT INTO products
     (name, major_category_id, subcategory_id, unit_id, unit, unit_price, display_order)

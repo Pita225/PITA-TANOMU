@@ -26,7 +26,7 @@
       </div>
       <label class="quantity-field">
         <span>数量</span>
-        <div><input name="quantity_{{ product.id }}" type="number" min="0" max="99999" step="any" inputmode="decimal" placeholder="0" data-price="{{ product.unit_price if product.unit_price is not none else '' }}"><b>{{ product.unit }}</b></div>
+        <div><input name="quantity_{{ product.id }}" type="number" min="0" max="99999" step="{{ '1' if product.decimal_places == 0 else ('0.1' if product.decimal_places == 1 else '0.01') }}" inputmode="{{ 'numeric' if product.decimal_places == 0 else 'decimal' }}" placeholder="0" data-price="{{ product.unit_price if product.unit_price is not none else '' }}"><b>{{ product.unit }}</b></div>
       </label>
     </article>
     {% endfor %}

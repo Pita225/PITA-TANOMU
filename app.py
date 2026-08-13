@@ -20,6 +20,9 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
+from audit_service import record_audit
+from backup_service import enabled as feature_enabled, run_backup
+
 
 BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY_FILE = BASE_DIR / ".secret_key"
@@ -38,6 +41,11 @@ def create_app(test_config=None):
         MAX_CONTENT_LENGTH=5 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
+        BACKUP_ENABLED=os.environ.get("BACKUP_ENABLED", "false"),
+        BACKUP_BACKEND=os.environ.get("BACKUP_BACKEND", "sqlite"),
+        BACKUP_STORAGE_PATH=os.environ.get("BACKUP_STORAGE_PATH", str(BASE_DIR / "backups")),
+        AUDIT_SNAPSHOT_ENABLED=os.environ.get("AUDIT_SNAPSHOT_ENABLED", "false"),
+        AUDIT_STORAGE_PATH=os.environ.get("AUDIT_STORAGE_PATH", str(BASE_DIR / "audit_snapshots")),
     )
     if test_config:
         app.config.update(test_config)
@@ -59,8 +67,10 @@ def create_app(test_config=None):
 
     @app.template_filter("quantity")
     def quantity(value):
-        number = float(value)
-        return str(int(number)) if number.is_integer() else f"{number:g}"
+        if value is None:
+            return ""
+        number = Decimal(str(value)).quantize(Decimal("0.01"))
+        return format(number, "f").rstrip("0").rstrip(".")
 
     @app.template_filter("correction_value")
     def correction_value(value):
@@ -86,6 +96,7 @@ def create_app(test_config=None):
             "environment_operator": is_environment_operator(),
             "training_reviewer": is_training_reviewer(),
             "training_mode": bool(getattr(g, "training_mode", False)),
+            "business_admin": is_environment_operator(),
         }
 
     @app.before_request
@@ -274,6 +285,11 @@ def create_app(test_config=None):
         session.clear()
         return redirect(url_for("login"))
 
+    @app.cli.command("backup")
+    def backup_command():
+        destination = run_backup(current_app.config)
+        print(destination if destination else "BACKUP_ENABLED=false: no backup created")
+
     @app.get("/")
     def index():
         db = get_db()
@@ -398,18 +414,22 @@ def create_app(test_config=None):
             flash("最初に発注元と発注先を選んでください。", "error")
             return redirect(url_for("index"))
         db = get_db()
-        product_rows = orderable_products()
+        stores = load_context_stores(context)
+        environment = stores["from_store"]["environment"]
+        product_rows = orderable_products(environment)
         major_categories = db.execute(
             """SELECT * FROM product_categories
-               WHERE level = 1 AND is_active = 1 AND is_deleted = 0 ORDER BY name, id"""
+               WHERE level = 1 AND is_active = 1 AND is_deleted = 0
+                 AND environment = ? ORDER BY name, id""", (environment,)
         ).fetchall()
         subcategories = db.execute(
             """SELECT c.* FROM product_categories c
                JOIN product_categories p ON p.id = c.parent_id
                WHERE c.level = 2 AND c.is_active = 1 AND c.is_deleted = 0
-                 AND p.is_active = 1 AND p.is_deleted = 0 ORDER BY c.name, c.id"""
+                 AND p.is_active = 1 AND p.is_deleted = 0
+                 AND c.environment = ? AND p.environment = ? ORDER BY c.name, c.id""",
+            (environment, environment),
         ).fetchall()
-        stores = load_context_stores(context)
         set_request_environment(stores["from_store"]["environment"])
         return render_template(
             "products.html", products=product_rows, major_categories=major_categories,
@@ -429,12 +449,12 @@ def create_app(test_config=None):
         invalid = False
         for product_id, product in products_by_id.items():
             raw = request.form.get(f"quantity_{product_id}", "").strip()
+            if not raw and product["source_product_id"]:
+                raw = request.form.get(f"quantity_{product['source_product_id']}", "").strip()
             if not raw:
                 continue
             try:
-                amount = Decimal(raw)
-                if not amount.is_finite() or amount <= 0 or amount > Decimal("99999"):
-                    raise InvalidOperation
+                amount, _minor = parse_quantity(raw, product["decimal_places"])
             except InvalidOperation:
                 invalid = True
                 continue
@@ -491,15 +511,25 @@ def create_app(test_config=None):
             db.execute("UPDATE orders SET order_number = ? WHERE id = ?", (order_number, order_id))
             db.executemany(
                 """INSERT INTO order_items
-                   (order_id, product_id, product_name, unit, quantity, unit_price,
-                    major_category_name, subcategory_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (order_id, product_id, product_name, unit, quantity, quantity_minor,
+                    quantity_decimal_places, unit_price, major_category_name, subcategory_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(
                     order_id, item["product_id"], item["name"], item["unit"],
-                    float(item["quantity"]), item["unit_price"],
+                    float(item["quantity"]), item["quantity_minor"],
+                    item["decimal_places"], item["unit_price"],
                     item["major_name"], item["subcategory_name"]
                 ) for item in items],
             )
+            saved_order = fetch_order(order_id)
+            for item in items:
+                audit_operation(
+                    "order_confirmed", saved_order,
+                    store_id=context["from_store_id"], product_name=item["name"],
+                    quantity_minor=item["quantity_minor"],
+                    after={"quantity_minor": item["quantity_minor"], "unit": item["unit"]},
+                    approval_status="ordered",
+                )
             db.commit()
         except sqlite3.Error:
             db.rollback()
@@ -596,13 +626,15 @@ def create_app(test_config=None):
             return redirect(url_for("received_detail", order_id=order_id))
         try:
             db.execute(
-                """UPDATE order_items SET final_received_quantity = received_quantity
+                """UPDATE order_items SET final_received_quantity = received_quantity,
+                          final_received_quantity_minor = received_quantity_minor
                    WHERE order_id = ? AND final_received_quantity IS NULL""",
                 (order_id,),
             )
             db.execute(
                 """UPDATE unexpected_items
                    SET status = 'accepted', final_received_quantity = arrived_quantity,
+                       final_received_quantity_minor = arrived_quantity_minor,
                        updated_at = datetime('now', 'localtime')
                    WHERE order_id = ? AND status = 'accept_pending'""",
                 (order_id,),
@@ -613,6 +645,10 @@ def create_app(test_config=None):
                        received_at = datetime('now', 'localtime')
                    WHERE id = ?""",
                 (order_id,),
+            )
+            audit_operation(
+                "approval_confirmed", order, store_id=order["from_store_id"],
+                after={"status": "received"}, approval_status="received",
             )
             db.commit()
         except sqlite3.Error:
@@ -642,6 +678,12 @@ def create_app(test_config=None):
                 """UPDATE unexpected_items SET status = 'return_complete',
                        updated_at = datetime('now', 'localtime') WHERE id = ?""",
                 (item_id,),
+            )
+            audit_operation(
+                "return_completed", order, store_id=order["from_store_id"],
+                product_name=item["product_name"], quantity_minor=item["arrived_quantity_minor"],
+                before={"status": "returned"}, after={"status": "return_complete"},
+                approval_status="return_complete",
             )
             db.commit()
             flash(f"「{item['product_name']}」の返品を確認しました。", "success")
@@ -715,20 +757,27 @@ def create_app(test_config=None):
             for item in items:
                 raw = request.form.get(f"received_quantity_{item['id']}", "").strip()
                 try:
-                    amount = Decimal(raw)
-                    if not amount.is_finite() or amount < 0 or amount > Decimal("99999"):
-                        raise InvalidOperation
+                    amount, amount_minor = parse_quantity(
+                        raw, item["quantity_decimal_places"], allow_zero=True
+                    )
                 except InvalidOperation:
                     flash("届いた数量は0以上の数値で入力してください。", "error")
                     return redirect(url_for("receipt_detail", order_id=order_id))
-                ordered_amount = Decimal(str(item["quantity"]))
-                is_match = amount == ordered_amount
+                is_match = amount_minor == item["quantity_minor"]
                 approval_required = approval_required or not is_match
                 final_quantity = float(amount) if is_match else None
-                received_values.append((float(amount), final_quantity, item["id"], order_id))
+                final_minor = amount_minor if is_match else None
+                received_values.append((
+                    float(amount), amount_minor, final_quantity, final_minor,
+                    item["id"], order_id
+                ))
 
             ordered_product_ids = {item["product_id"] for item in items}
             product_map = {product["id"]: product for product in products}
+            product_map.update({
+                product["source_product_id"]: product for product in products
+                if product["source_product_id"]
+            })
             extra_values = []
             seen_extra_products = set()
             extra_keys = sorted(
@@ -749,9 +798,9 @@ def create_app(test_config=None):
                     flash("注文外商品と対応方法を正しく選択してください。", "error")
                     return redirect(url_for("receipt_detail", order_id=order_id))
                 try:
-                    amount = Decimal(raw_quantity)
-                    if not amount.is_finite() or amount <= 0 or amount > Decimal("99999"):
-                        raise InvalidOperation
+                    amount, amount_minor = parse_quantity(
+                        raw_quantity, product["decimal_places"]
+                    )
                 except InvalidOperation:
                     flash("注文外商品の数量は0より大きい数値で入力してください。", "error")
                     return redirect(url_for("receipt_detail", order_id=order_id))
@@ -761,14 +810,17 @@ def create_app(test_config=None):
                 approval_required = approval_required or decision == "accept"
                 extra_values.append((
                     order_id, product_id, product["name"], product["unit"],
-                    float(amount), decision, status, final_quantity, product["unit_price"],
+                    float(amount), amount_minor, product["decimal_places"], decision,
+                    status, final_quantity, 0 if decision == "return" else None,
+                    product["unit_price"],
                     product["major_name"], product["subcategory_name"],
                 ))
 
             try:
                 db.executemany(
                     """UPDATE order_items
-                       SET received_quantity = ?, final_received_quantity = ?
+                       SET received_quantity = ?, received_quantity_minor = ?,
+                           final_received_quantity = ?, final_received_quantity_minor = ?
                        WHERE id = ? AND order_id = ?""",
                     received_values,
                 )
@@ -776,9 +828,10 @@ def create_app(test_config=None):
                     db.executemany(
                         """INSERT INTO unexpected_items
                            (order_id, product_id, product_name, unit, arrived_quantity,
-                            decision, status, final_received_quantity, unit_price,
+                            arrived_quantity_minor, quantity_decimal_places, decision,
+                            status, final_received_quantity, final_received_quantity_minor, unit_price,
                             major_category_name, subcategory_name)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         extra_values,
                     )
                 new_status = "pending_sender_approval" if approval_required else "received"
@@ -790,6 +843,23 @@ def create_app(test_config=None):
                        WHERE id = ?""",
                     (new_status, new_status, order_id),
                 )
+                for item, values in zip(items, received_values):
+                    received_minor = values[1]
+                    event_type = "receipt_confirmed" if received_minor == item["quantity_minor"] else "quantity_difference"
+                    audit_operation(
+                        event_type, order, store_id=order["to_store_id"],
+                        product_name=item["product_name"], quantity_minor=received_minor,
+                        before={"ordered_quantity_minor": item["quantity_minor"]},
+                        after={"received_quantity_minor": received_minor},
+                        approval_status=new_status,
+                    )
+                for values in extra_values:
+                    audit_operation(
+                        "unexpected_item", order, store_id=order["to_store_id"],
+                        product_name=values[2], quantity_minor=values[5],
+                        after={"decision": values[7], "quantity_minor": values[5]},
+                        approval_status=new_status,
+                    )
                 db.commit()
             except sqlite3.Error:
                 db.rollback()
@@ -828,6 +898,12 @@ def create_app(test_config=None):
                 """UPDATE unexpected_items SET status = 'returned',
                        updated_at = datetime('now', 'localtime') WHERE id = ?""",
                 (item_id,),
+            )
+            audit_operation(
+                "return_confirmed", order, store_id=order["to_store_id"],
+                product_name=item["product_name"], quantity_minor=item["arrived_quantity_minor"],
+                before={"status": "return_pending"}, after={"status": "returned"},
+                approval_status="returned",
             )
             db.commit()
             flash(f"「{item['product_name']}」を返品済みにしました。", "success")
@@ -937,13 +1013,15 @@ def create_app(test_config=None):
         )
 
     @app.route("/reports/correct/<line_type>/<int:line_id>", methods=["GET", "POST"])
-    @admin_required
+    @business_admin_required
     def correct_transaction(line_type, line_id):
         if line_type not in {"order_item", "unexpected_item"}:
             abort(404)
         line = find_transaction_line(line_type, line_id)
         if line is None:
             abort(404)
+        if is_training_reviewer() and line["environment"] != "training":
+            abort(403)
         set_request_environment(line["environment"])
         db = get_db()
         if request.method == "POST":
@@ -952,20 +1030,25 @@ def create_app(test_config=None):
             raw_quantity = request.form.get("quantity", "").strip()
             raw_price = request.form.get("unit_price", "").replace(",", "").strip()
             product = db.execute(
-                """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name
+                """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name,
+                          u.decimal_places
                    FROM products p
                    JOIN product_categories major ON major.id = p.major_category_id
                    JOIN product_categories sub ON sub.id = p.subcategory_id
-                   WHERE p.id = ? AND p.is_deleted = 0""", (product_id,)
+                   JOIN units u ON u.id = p.unit_id
+                   WHERE p.id = ? AND p.is_deleted = 0 AND p.environment = ?""",
+                (product_id, line["environment"])
             ).fetchone()
             error = None
             try:
-                quantity_value = Decimal(raw_quantity)
-                if not quantity_value.is_finite() or quantity_value < 0 or quantity_value > Decimal("99999"):
-                    raise InvalidOperation
+                quantity_value, quantity_minor = parse_quantity(
+                    raw_quantity, product["decimal_places"] if product else 2,
+                    allow_zero=True,
+                )
             except InvalidOperation:
                 error = "最終数量は0以上の数値で入力してください。"
                 quantity_value = Decimal("0")
+                quantity_minor = 0
             unit_price = None
             if raw_price:
                 try:
@@ -994,13 +1077,19 @@ def create_app(test_config=None):
                        (order_id, line_type, line_id, corrected_product_id,
                         corrected_product_name, corrected_major_category_name,
                         corrected_subcategory_name, corrected_unit, corrected_quantity,
-                        corrected_unit_price, reason, before_json, after_json, admin_user_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        corrected_quantity_minor, corrected_unit_price, reason,
+                        before_json, after_json, admin_user_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (line["order_id"], line_type, line_id, product["id"], product["name"],
                      product["major_name"], product["subcategory_name"], product["unit"],
-                     float(quantity_value), unit_price, reason,
+                     float(quantity_value), quantity_minor, unit_price, reason,
                      json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False),
                      g.user["id"]),
+                )
+                audit_operation(
+                    "correction", fetch_order(line["order_id"]),
+                    product_name=product["name"], quantity_minor=quantity_minor,
+                    before=before, after=after, approval_status="corrected",
                 )
                 db.commit()
                 flash("最終確定値を訂正し、訂正履歴を保存しました。", "success")
@@ -1008,10 +1097,13 @@ def create_app(test_config=None):
                     "report_daily", date=line["date"], store_id=request.args.get("store_id")
                 ))
         products = db.execute(
-            """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name
+            """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name,
+                      u.decimal_places
                FROM products p JOIN product_categories major ON major.id = p.major_category_id
                JOIN product_categories sub ON sub.id = p.subcategory_id
-               WHERE p.is_deleted = 0 ORDER BY major.name, sub.name, p.name"""
+               JOIN units u ON u.id = p.unit_id
+               WHERE p.is_deleted = 0 AND p.environment = ?
+               ORDER BY major.name, sub.name, p.name""", (line["environment"],)
         ).fetchall()
         history = correction_history(line_type, line_id)
         return render_template(
@@ -1019,7 +1111,7 @@ def create_app(test_config=None):
         )
 
     @app.get("/reports/corrections")
-    @admin_required
+    @business_admin_required
     def report_corrections():
         environment = report_scope_environment(request.args.get("environment"))
         set_request_environment(environment)
@@ -1085,8 +1177,10 @@ def create_app(test_config=None):
         )
 
     @app.get("/product-management")
-    @admin_required
+    @business_admin_required
     def product_management():
+        environment = master_environment()
+        set_request_environment(environment)
         products = get_db().execute(
             """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name,
                       u.name AS unit_name
@@ -1094,23 +1188,25 @@ def create_app(test_config=None):
                LEFT JOIN product_categories major ON major.id = p.major_category_id
                LEFT JOIN product_categories sub ON sub.id = p.subcategory_id
                LEFT JOIN units u ON u.id = p.unit_id
-               WHERE p.is_deleted = 0
-               ORDER BY p.is_active DESC, major.name, sub.name, p.display_order, p.id"""
+               WHERE p.is_deleted = 0 AND p.environment = ?
+               ORDER BY p.is_active DESC, major.name, sub.name, p.display_order, p.id""",
+            (environment,),
         ).fetchall()
         return render_template("product_management.html", products=products)
 
     @app.route("/product-management/new", methods=["GET", "POST"])
-    @admin_required
+    @business_admin_required
     def new_product():
         if request.method == "POST":
             return save_product_form()
         return render_product_form()
 
     @app.route("/product-management/<int:product_id>/edit", methods=["GET", "POST"])
-    @admin_required
+    @business_admin_required
     def edit_product(product_id):
         product = get_db().execute(
-            "SELECT * FROM products WHERE id = ? AND is_deleted = 0", (product_id,)
+            "SELECT * FROM products WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (product_id, master_environment())
         ).fetchone()
         if product is None:
             abort(404)
@@ -1119,11 +1215,12 @@ def create_app(test_config=None):
         return render_product_form(product)
 
     @app.post("/product-management/<int:product_id>/toggle")
-    @admin_required
+    @business_admin_required
     def toggle_product(product_id):
         db = get_db()
         product = db.execute(
-            "SELECT * FROM products WHERE id = ? AND is_deleted = 0", (product_id,)
+            "SELECT * FROM products WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (product_id, master_environment())
         ).fetchone()
         if product is None:
             abort(404)
@@ -1134,11 +1231,12 @@ def create_app(test_config=None):
         return redirect(url_for("product_management"))
 
     @app.post("/product-management/<int:product_id>/delete")
-    @admin_required
+    @business_admin_required
     def delete_product(product_id):
         db = get_db()
         product = db.execute(
-            "SELECT * FROM products WHERE id = ? AND is_deleted = 0", (product_id,)
+            "SELECT * FROM products WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (product_id, master_environment())
         ).fetchone()
         if product is None:
             abort(404)
@@ -1150,53 +1248,60 @@ def create_app(test_config=None):
         return redirect(url_for("product_management"))
 
     @app.get("/categories")
-    @admin_required
+    @business_admin_required
     def categories():
         db = get_db()
+        environment = master_environment()
+        set_request_environment(environment)
         majors = db.execute(
             """SELECT * FROM product_categories
-               WHERE level = 1 AND is_deleted = 0 ORDER BY id"""
+               WHERE level = 1 AND is_deleted = 0 AND environment = ? ORDER BY id""",
+            (environment,),
         ).fetchall()
         subs = db.execute(
             """SELECT c.*, p.name AS parent_name FROM product_categories c
                JOIN product_categories p ON p.id = c.parent_id
-               WHERE c.level = 2 AND c.is_deleted = 0 ORDER BY p.id, c.id"""
+               WHERE c.level = 2 AND c.is_deleted = 0 AND c.environment = ?
+                 AND p.environment = ? ORDER BY p.id, c.id""",
+            (environment, environment),
         ).fetchall()
         return render_template("categories.html", majors=majors, subcategories=subs)
 
     @app.post("/categories/add")
-    @admin_required
+    @business_admin_required
     def add_category():
         db = get_db()
+        environment = master_environment()
         name = normalize_master_name(request.form.get("name"))
         level = request.form.get("level", type=int)
         parent_id = request.form.get("parent_id", type=int) if level == 2 else None
-        error = validate_category(db, name, level, parent_id)
+        error = validate_category(db, name, level, parent_id, environment=environment)
         if error:
             flash(error, "error")
         else:
             db.execute(
-                "INSERT INTO product_categories (name, level, parent_id) VALUES (?, ?, ?)",
-                (name, level, parent_id),
+                "INSERT INTO product_categories (name, level, parent_id, environment) VALUES (?, ?, ?, ?)",
+                (name, level, parent_id, environment),
             )
             db.commit()
             flash(f"分類「{name}」を追加しました。", "success")
         return redirect(url_for("categories"))
 
     @app.route("/categories/<int:category_id>/edit", methods=["GET", "POST"])
-    @admin_required
+    @business_admin_required
     def edit_category(category_id):
         db = get_db()
         category = db.execute(
-            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0",
-            (category_id,),
+            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (category_id, master_environment()),
         ).fetchone()
         if category is None:
             abort(404)
         if request.method == "POST":
             name = normalize_master_name(request.form.get("name"))
             error = validate_category(
-                db, name, category["level"], category["parent_id"], category_id
+                db, name, category["level"], category["parent_id"], category_id,
+                category["environment"]
             )
             if error:
                 flash(error, "error")
@@ -1208,12 +1313,12 @@ def create_app(test_config=None):
         return render_template("master_edit.html", item=category, master_name="分類", back_endpoint="categories")
 
     @app.post("/categories/<int:category_id>/toggle")
-    @admin_required
+    @business_admin_required
     def toggle_category(category_id):
         db = get_db()
         category = db.execute(
-            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0",
-            (category_id,),
+            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (category_id, master_environment()),
         ).fetchone()
         if category is None:
             abort(404)
@@ -1224,12 +1329,12 @@ def create_app(test_config=None):
         return redirect(url_for("categories"))
 
     @app.post("/categories/<int:category_id>/delete")
-    @admin_required
+    @business_admin_required
     def delete_category(category_id):
         db = get_db()
         category = db.execute(
-            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0",
-            (category_id,),
+            "SELECT * FROM product_categories WHERE id = ? AND is_deleted = 0 AND environment = ?",
+            (category_id, master_environment()),
         ).fetchone()
         if category is None:
             abort(404)
@@ -1256,56 +1361,70 @@ def create_app(test_config=None):
         return redirect(url_for("categories"))
 
     @app.get("/units")
-    @admin_required
+    @business_admin_required
     def units():
+        environment = master_environment()
+        set_request_environment(environment)
         rows = get_db().execute(
-            "SELECT * FROM units WHERE is_deleted = 0 ORDER BY id"
+            "SELECT * FROM units WHERE is_deleted = 0 AND environment = ? ORDER BY id",
+            (environment,),
         ).fetchall()
         return render_template("units.html", units=rows)
 
     @app.post("/units/add")
-    @admin_required
+    @business_admin_required
     def add_unit():
         db = get_db()
+        environment = master_environment()
         name = normalize_master_name(request.form.get("name"))
+        decimal_places = request.form.get("decimal_places", type=int)
+        if decimal_places is None:
+            decimal_places = 0
         if not name:
             flash("単位名を入力してください。", "error")
         elif len(name) > 20:
             flash("単位名は20文字以内で入力してください。", "error")
-        elif db.execute("SELECT 1 FROM units WHERE name = ?", (name,)).fetchone():
+        elif decimal_places not in {0, 1, 2}:
+            flash("小数桁数は0～2を選択してください。", "error")
+        elif db.execute("SELECT 1 FROM units WHERE name = ? AND environment = ?", (name, environment)).fetchone():
             flash("同じ単位がすでに登録されています。", "error")
         else:
-            db.execute("INSERT INTO units (name) VALUES (?)", (name,))
+            db.execute("INSERT INTO units (name, environment, decimal_places) VALUES (?, ?, ?)", (name, environment, decimal_places))
             db.commit()
             flash(f"単位「{name}」を追加しました。", "success")
         return redirect(url_for("units"))
 
     @app.route("/units/<int:unit_id>/edit", methods=["GET", "POST"])
-    @admin_required
+    @business_admin_required
     def edit_unit(unit_id):
         db = get_db()
-        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0", (unit_id,)).fetchone()
+        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0 AND environment = ?", (unit_id, master_environment())).fetchone()
         if unit is None:
             abort(404)
         if request.method == "POST":
             name = normalize_master_name(request.form.get("name"))
+            decimal_places = request.form.get("decimal_places", type=int)
+            if decimal_places is None:
+                decimal_places = unit["decimal_places"]
             if not name or len(name) > 20:
                 flash("単位名は1～20文字で入力してください。", "error")
-            elif db.execute("SELECT 1 FROM units WHERE name = ? AND id <> ?", (name, unit_id)).fetchone():
+            elif decimal_places not in {0, 1, 2}:
+                flash("小数桁数は0～2を選択してください。", "error")
+            elif db.execute("SELECT 1 FROM units WHERE name = ? AND environment = ? AND id <> ?", (name, unit["environment"], unit_id)).fetchone():
                 flash("同じ単位がすでに登録されています。", "error")
             else:
-                db.execute("UPDATE units SET name = ? WHERE id = ?", (name, unit_id))
-                db.execute("UPDATE products SET unit = ? WHERE unit_id = ?", (name, unit_id))
+                db.execute("UPDATE units SET name = ?, decimal_places = ? WHERE id = ?", (name, decimal_places, unit_id))
+                db.execute("UPDATE products SET unit = ? WHERE unit_id = ? AND environment = ?", (name, unit_id, unit["environment"]))
                 db.commit()
                 flash(f"単位を「{name}」に変更しました。", "success")
                 return redirect(url_for("units"))
         return render_template("master_edit.html", item=unit, master_name="単位", back_endpoint="units")
 
     @app.post("/units/<int:unit_id>/toggle")
-    @admin_required
+    @business_admin_required
     def toggle_unit(unit_id):
         db = get_db()
-        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0", (unit_id,)).fetchone()
+        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0 AND environment = ?", (unit_id, master_environment())).fetchone()
         if unit is None:
             abort(404)
         new_status = 0 if unit["is_active"] else 1
@@ -1315,10 +1434,10 @@ def create_app(test_config=None):
         return redirect(url_for("units"))
 
     @app.post("/units/<int:unit_id>/delete")
-    @admin_required
+    @business_admin_required
     def delete_unit(unit_id):
         db = get_db()
-        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0", (unit_id,)).fetchone()
+        unit = db.execute("SELECT * FROM units WHERE id = ? AND is_deleted = 0 AND environment = ?", (unit_id, master_environment())).fetchone()
         if unit is None:
             abort(404)
         used = db.execute(
@@ -1681,6 +1800,7 @@ def init_db():
     db.executescript((BASE_DIR / "schema.sql").read_text(encoding="utf-8"))
     db.executescript((BASE_DIR / "seed.sql").read_text(encoding="utf-8"))
     db.commit()
+    migrate_db()
 
 
 def migrate_db():
@@ -1774,6 +1894,40 @@ def migrate_db():
                is_deleted INTEGER NOT NULL DEFAULT 0
            )"""
     )
+    category_columns = {row["name"] for row in db.execute("PRAGMA table_info(product_categories)")}
+    if "environment" not in category_columns:
+        db.execute("ALTER TABLE product_categories ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'")
+
+    unit_columns = {row["name"] for row in db.execute("PRAGMA table_info(units)")}
+    if "environment" not in unit_columns:
+        # The legacy table has UNIQUE(name), which prevents equal names in the
+        # production and training scopes. Rebuild it once without changing IDs.
+        db.commit()
+        db.execute("PRAGMA foreign_keys = OFF")
+        db.execute(
+            """CREATE TABLE units_v2 (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT NOT NULL,
+                   environment TEXT NOT NULL DEFAULT 'production',
+                   decimal_places INTEGER NOT NULL DEFAULT 0,
+                   is_active INTEGER NOT NULL DEFAULT 1,
+                   is_deleted INTEGER NOT NULL DEFAULT 0,
+                   UNIQUE (name, environment)
+               )"""
+        )
+        db.execute(
+            """INSERT INTO units_v2 (id, name, environment, decimal_places, is_active, is_deleted)
+               SELECT id, name, 'production', CASE WHEN name = 'kg' THEN 2 ELSE 0 END,
+                      is_active, is_deleted FROM units"""
+        )
+        db.execute("DROP TABLE units")
+        db.execute("ALTER TABLE units_v2 RENAME TO units")
+        db.commit()
+        db.execute("PRAGMA foreign_keys = ON")
+    else:
+        if "decimal_places" not in unit_columns:
+            db.execute("ALTER TABLE units ADD COLUMN decimal_places INTEGER NOT NULL DEFAULT 0")
+        db.execute("UPDATE units SET decimal_places = 2 WHERE name = 'kg' AND decimal_places = 0")
     major = db.execute(
         """SELECT id FROM product_categories
            WHERE name = '未分類' AND level = 1 AND parent_id IS NULL LIMIT 1"""
@@ -1810,6 +1964,10 @@ def migrate_db():
         db.execute("ALTER TABLE products ADD COLUMN image_filename TEXT")
     if "is_deleted" not in product_columns:
         db.execute("ALTER TABLE products ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+    if "environment" not in product_columns:
+        db.execute("ALTER TABLE products ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'")
+    if "source_product_id" not in product_columns:
+        db.execute("ALTER TABLE products ADD COLUMN source_product_id INTEGER")
     db.execute(
         "UPDATE products SET major_category_id = ? WHERE major_category_id IS NULL",
         (major_id,),
@@ -1826,6 +1984,47 @@ def migrate_db():
                SELECT id FROM units WHERE units.name = products.unit
            ) WHERE unit_id IS NULL"""
     )
+
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')))"
+    )
+    if db.execute(
+        "SELECT 1 FROM app_migrations WHERE name = 'training_master_split_v1'"
+    ).fetchone() is None:
+        category_map = {}
+        for row in db.execute(
+            "SELECT * FROM product_categories WHERE environment = 'production' ORDER BY level, id"
+        ).fetchall():
+            parent_id = category_map.get(row["parent_id"]) if row["parent_id"] else None
+            new_id = db.execute(
+                """INSERT INTO product_categories
+                   (name, level, parent_id, environment, is_active, is_deleted)
+                   VALUES (?, ?, ?, 'training', ?, ?)""",
+                (row["name"], row["level"], parent_id, row["is_active"], row["is_deleted"]),
+            ).lastrowid
+            category_map[row["id"]] = new_id
+        unit_map = {}
+        for row in db.execute("SELECT * FROM units WHERE environment = 'production' ORDER BY id").fetchall():
+            new_id = db.execute(
+                """INSERT INTO units
+                   (name, environment, decimal_places, is_active, is_deleted)
+                   VALUES (?, 'training', ?, ?, ?)""",
+                (row["name"], row["decimal_places"], row["is_active"], row["is_deleted"]),
+            ).lastrowid
+            unit_map[row["id"]] = new_id
+        for row in db.execute("SELECT * FROM products WHERE environment = 'production' ORDER BY id").fetchall():
+            db.execute(
+                """INSERT INTO products
+                   (name, major_category_id, subcategory_id, unit_id, unit, unit_price,
+                    image_filename, environment, source_product_id, display_order,
+                    is_active, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'training', ?, ?, ?, ?)""",
+                (row["name"], category_map[row["major_category_id"]],
+                 category_map[row["subcategory_id"]], unit_map[row["unit_id"]],
+                 row["unit"], row["unit_price"], row["image_filename"], row["id"],
+                 row["display_order"], row["is_active"], row["is_deleted"]),
+            )
+        db.execute("INSERT INTO app_migrations (name) VALUES ('training_master_split_v1')")
 
     order_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(orders)").fetchall()
@@ -1854,6 +2053,18 @@ def migrate_db():
         db.execute("ALTER TABLE order_items ADD COLUMN major_category_name TEXT")
     if "subcategory_name" not in item_columns:
         db.execute("ALTER TABLE order_items ADD COLUMN subcategory_name TEXT")
+    if "quantity_minor" not in item_columns:
+        db.execute("ALTER TABLE order_items ADD COLUMN quantity_minor INTEGER")
+    if "quantity_decimal_places" not in item_columns:
+        db.execute("ALTER TABLE order_items ADD COLUMN quantity_decimal_places INTEGER NOT NULL DEFAULT 0")
+    if "received_quantity_minor" not in item_columns:
+        db.execute("ALTER TABLE order_items ADD COLUMN received_quantity_minor INTEGER")
+    if "final_received_quantity_minor" not in item_columns:
+        db.execute("ALTER TABLE order_items ADD COLUMN final_received_quantity_minor INTEGER")
+    db.execute("UPDATE order_items SET quantity_minor = CAST(ROUND(quantity * 100) AS INTEGER) WHERE quantity_minor IS NULL")
+    db.execute("UPDATE order_items SET quantity_decimal_places = 2 WHERE unit = 'kg' AND quantity_decimal_places = 0")
+    db.execute("UPDATE order_items SET received_quantity_minor = CAST(ROUND(received_quantity * 100) AS INTEGER) WHERE received_quantity IS NOT NULL AND received_quantity_minor IS NULL")
+    db.execute("UPDATE order_items SET final_received_quantity_minor = CAST(ROUND(final_received_quantity * 100) AS INTEGER) WHERE final_received_quantity IS NOT NULL AND final_received_quantity_minor IS NULL")
     db.execute(
         """UPDATE order_items SET
                major_category_name = COALESCE(major_category_name, (
@@ -1907,6 +2118,15 @@ def migrate_db():
         db.execute("ALTER TABLE unexpected_items ADD COLUMN major_category_name TEXT")
     if "subcategory_name" not in unexpected_columns:
         db.execute("ALTER TABLE unexpected_items ADD COLUMN subcategory_name TEXT")
+    if "arrived_quantity_minor" not in unexpected_columns:
+        db.execute("ALTER TABLE unexpected_items ADD COLUMN arrived_quantity_minor INTEGER")
+    if "quantity_decimal_places" not in unexpected_columns:
+        db.execute("ALTER TABLE unexpected_items ADD COLUMN quantity_decimal_places INTEGER NOT NULL DEFAULT 0")
+    if "final_received_quantity_minor" not in unexpected_columns:
+        db.execute("ALTER TABLE unexpected_items ADD COLUMN final_received_quantity_minor INTEGER")
+    db.execute("UPDATE unexpected_items SET arrived_quantity_minor = CAST(ROUND(arrived_quantity * 100) AS INTEGER) WHERE arrived_quantity_minor IS NULL")
+    db.execute("UPDATE unexpected_items SET quantity_decimal_places = 2 WHERE unit = 'kg' AND quantity_decimal_places = 0")
+    db.execute("UPDATE unexpected_items SET final_received_quantity_minor = CAST(ROUND(final_received_quantity * 100) AS INTEGER) WHERE final_received_quantity IS NOT NULL AND final_received_quantity_minor IS NULL")
     db.execute(
         """UPDATE unexpected_items SET
                major_category_name = COALESCE(major_category_name, (
@@ -1955,6 +2175,45 @@ def migrate_db():
         """CREATE INDEX IF NOT EXISTS idx_corrections_order
            ON transaction_corrections (order_id, id DESC)"""
     )
+    correction_columns = {row["name"] for row in db.execute("PRAGMA table_info(transaction_corrections)")}
+    if "corrected_quantity_minor" not in correction_columns:
+        db.execute("ALTER TABLE transaction_corrections ADD COLUMN corrected_quantity_minor INTEGER")
+    db.execute("UPDATE transaction_corrections SET corrected_quantity_minor = CAST(ROUND(corrected_quantity * 100) AS INTEGER) WHERE corrected_quantity_minor IS NULL")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS audit_events (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               occurred_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+               user_id INTEGER NOT NULL, user_login_id TEXT NOT NULL,
+               store_id INTEGER, store_name TEXT, order_id INTEGER, order_number TEXT,
+               event_type TEXT NOT NULL, product_name TEXT, quantity_minor INTEGER,
+               before_json TEXT, after_json TEXT, approval_status TEXT,
+               environment TEXT NOT NULL, snapshot_path TEXT,
+               FOREIGN KEY (user_id) REFERENCES users (id),
+               FOREIGN KEY (store_id) REFERENCES stores (id),
+               FOREIGN KEY (order_id) REFERENCES orders (id)
+           )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_search ON audit_events (store_id, occurred_at, event_type, order_id)")
+    db.executescript(
+        """CREATE TRIGGER IF NOT EXISTS fill_order_item_quantity_minor
+           AFTER INSERT ON order_items WHEN NEW.quantity_minor IS NULL BEGIN
+             UPDATE order_items SET quantity_minor = CAST(ROUND(NEW.quantity * 100) AS INTEGER),
+               received_quantity_minor = CASE WHEN NEW.received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.received_quantity * 100) AS INTEGER) END,
+               final_received_quantity_minor = CASE WHEN NEW.final_received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.final_received_quantity * 100) AS INTEGER) END
+             WHERE id = NEW.id;
+           END;
+           CREATE TRIGGER IF NOT EXISTS fill_unexpected_quantity_minor
+           AFTER INSERT ON unexpected_items WHEN NEW.arrived_quantity_minor IS NULL BEGIN
+             UPDATE unexpected_items SET arrived_quantity_minor = CAST(ROUND(NEW.arrived_quantity * 100) AS INTEGER),
+               final_received_quantity_minor = CASE WHEN NEW.final_received_quantity IS NULL THEN NULL ELSE CAST(ROUND(NEW.final_received_quantity * 100) AS INTEGER) END
+             WHERE id = NEW.id;
+           END;
+           CREATE TRIGGER IF NOT EXISTS fill_correction_quantity_minor
+           AFTER INSERT ON transaction_corrections WHEN NEW.corrected_quantity_minor IS NULL BEGIN
+             UPDATE transaction_corrections SET corrected_quantity_minor = CAST(ROUND(NEW.corrected_quantity * 100) AS INTEGER)
+             WHERE id = NEW.id;
+           END;"""
+    )
     db.commit()
 
 
@@ -1997,7 +2256,8 @@ def build_cart_items(cart):
     items = []
     for saved in cart:
         product = db.execute(
-            """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name
+            """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name,
+                      u.decimal_places
                FROM products p
                JOIN product_categories major ON major.id = p.major_category_id
                JOIN product_categories sub ON sub.id = p.subcategory_id
@@ -2005,13 +2265,14 @@ def build_cart_items(cart):
                WHERE p.id = ? AND p.is_active = 1 AND p.is_deleted = 0
                  AND major.is_active = 1 AND major.is_deleted = 0
                  AND sub.is_active = 1 AND sub.is_deleted = 0
-                 AND u.is_active = 1 AND u.is_deleted = 0""",
-            (saved.get("product_id"),),
+                 AND u.is_active = 1 AND u.is_deleted = 0 AND p.environment = ?""",
+            (saved.get("product_id"), master_environment() if current_order_context() is None
+             else load_context_stores(current_order_context())["from_store"]["environment"]),
         ).fetchone()
         if product is None:
             continue
         try:
-            amount = Decimal(saved["quantity"])
+            amount, quantity_minor = parse_quantity(saved["quantity"], product["decimal_places"])
         except (InvalidOperation, KeyError):
             continue
         subtotal = None
@@ -2021,6 +2282,7 @@ def build_cart_items(cart):
             "product_id": product["id"], "name": product["name"],
             "unit": product["unit"], "unit_price": product["unit_price"],
             "quantity": float(amount), "subtotal": subtotal,
+            "quantity_minor": quantity_minor, "decimal_places": product["decimal_places"],
             "major_name": product["major_name"],
             "subcategory_name": product["subcategory_name"],
         })
@@ -2039,6 +2301,28 @@ def fetch_order(order_id):
 
 def normalize_store_name(value):
     return " ".join((value or "").split())
+
+
+def parse_quantity(value, decimal_places, *, allow_zero=False):
+    """Validate a quantity and return (Decimal, fixed hundredths integer)."""
+    try:
+        amount = Decimal((value or "").strip())
+        places = int(decimal_places)
+        quantum = Decimal(1).scaleb(-places)
+        if (
+            places not in {0, 1, 2} or not amount.is_finite()
+            or amount > Decimal("99999") or amount < 0
+            or (amount == 0 and not allow_zero)
+            or amount != amount.quantize(quantum)
+        ):
+            raise InvalidOperation
+    except (InvalidOperation, ValueError, TypeError):
+        raise InvalidOperation from None
+    return amount, int(amount * 100)
+
+
+def minor_to_decimal(value):
+    return Decimal(int(value)) / Decimal(100)
 
 
 def normalize_master_name(value):
@@ -2072,6 +2356,18 @@ def admin_required(view):
     return wrapped
 
 
+def business_admin_required(view):
+    """Allow system admin everywhere and reviewer only inside training."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None:
+            return redirect(url_for("login"))
+        if not is_environment_operator():
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
 def is_admin():
     return (
         g.user is not None and g.user["role"] == "admin"
@@ -2088,6 +2384,33 @@ def is_training_reviewer():
 
 def is_environment_operator():
     return is_admin() or is_training_reviewer()
+
+
+def audit_operation(event_type, order, *, store_id=None, product_name=None,
+                    quantity_minor=None, before=None, after=None,
+                    approval_status=None):
+    if not feature_enabled(current_app.config.get("AUDIT_SNAPSHOT_ENABLED", False)):
+        return False
+    db = get_db()
+    if store_id is None:
+        store_id = g.user["store_id"] if g.user and g.user["store_id"] else order["from_store_id"]
+    store = db.execute("SELECT * FROM stores WHERE id = ?", (store_id,)).fetchone()
+    environment = "training" if order_is_training(order) else "production"
+    return record_audit(
+        db, current_app.config, user=g.user, event_type=event_type,
+        environment=environment, store=store, order=order,
+        product_name=product_name, quantity_minor=quantity_minor,
+        before=before, after=after, approval_status=approval_status,
+    )
+
+
+def master_environment():
+    """Master-data scope; reviewers can never select production."""
+    if is_training_reviewer():
+        return "training"
+    if g.user and g.user["role"] == "store":
+        return g.user["store_environment"]
+    return session.get("view_environment", "production")
 
 
 def order_is_training(order):
@@ -2118,7 +2441,8 @@ def require_order_role(order, store_column):
         abort(403)
 
 
-def validate_category(db, name, level, parent_id, exclude_id=None):
+def validate_category(db, name, level, parent_id, exclude_id=None, environment=None):
+    environment = environment or master_environment()
     if not name or len(name) > 50:
         return "分類名は1～50文字で入力してください。"
     if level not in {1, 2}:
@@ -2126,16 +2450,18 @@ def validate_category(db, name, level, parent_id, exclude_id=None):
     if level == 2:
         parent = db.execute(
             """SELECT 1 FROM product_categories
-               WHERE id = ? AND level = 1 AND is_active = 1 AND is_deleted = 0""",
-            (parent_id,),
+               WHERE id = ? AND level = 1 AND is_active = 1 AND is_deleted = 0
+                 AND environment = ?""",
+            (parent_id, environment),
         ).fetchone()
         if parent is None:
             return "有効な大分類を選択してください。"
     duplicate = db.execute(
         """SELECT 1 FROM product_categories
            WHERE name = ? AND level = ? AND parent_id IS ? AND is_deleted = 0
+             AND environment = ?
              AND (? IS NULL OR id <> ?)""",
-        (name, level, parent_id, exclude_id, exclude_id),
+        (name, level, parent_id, environment, exclude_id, exclude_id),
     ).fetchone()
     if duplicate:
         return "同じ分類がすでに登録されています。"
@@ -2144,18 +2470,24 @@ def validate_category(db, name, level, parent_id, exclude_id=None):
 
 def render_product_form(product=None):
     db = get_db()
+    environment = master_environment()
+    set_request_environment(environment)
     majors = db.execute(
         """SELECT * FROM product_categories
-           WHERE level = 1 AND is_active = 1 AND is_deleted = 0 ORDER BY name, id"""
+           WHERE level = 1 AND is_active = 1 AND is_deleted = 0
+             AND environment = ? ORDER BY name, id""", (environment,)
     ).fetchall()
     subcategories = db.execute(
         """SELECT c.* FROM product_categories c
            JOIN product_categories p ON p.id = c.parent_id
            WHERE c.level = 2 AND c.is_active = 1 AND c.is_deleted = 0
-             AND p.is_active = 1 AND p.is_deleted = 0 ORDER BY c.name, c.id"""
+             AND p.is_active = 1 AND p.is_deleted = 0
+             AND c.environment = ? AND p.environment = ? ORDER BY c.name, c.id""",
+        (environment, environment),
     ).fetchall()
     units = db.execute(
-        "SELECT * FROM units WHERE is_active = 1 AND is_deleted = 0 ORDER BY name, id"
+        "SELECT * FROM units WHERE is_active = 1 AND is_deleted = 0 AND environment = ? ORDER BY name, id",
+        (environment,),
     ).fetchall()
     return render_template(
         "product_form.html", product=product, majors=majors,
@@ -2165,6 +2497,7 @@ def render_product_form(product=None):
 
 def save_product_form(product=None):
     db = get_db()
+    environment = master_environment()
     name = normalize_master_name(request.form.get("name"))
     major_id = request.form.get("major_category_id", type=int)
     subcategory_id = request.form.get("subcategory_id", type=int)
@@ -2179,12 +2512,13 @@ def save_product_form(product=None):
            JOIN product_categories major ON major.id = sub.parent_id
            WHERE sub.id = ? AND sub.level = 2 AND sub.is_active = 1 AND sub.is_deleted = 0
              AND major.id = ? AND major.level = 1
-             AND major.is_active = 1 AND major.is_deleted = 0""",
-        (subcategory_id, major_id),
+             AND major.is_active = 1 AND major.is_deleted = 0
+             AND sub.environment = ? AND major.environment = ?""",
+        (subcategory_id, major_id, environment, environment),
     ).fetchone()
     unit = db.execute(
-        "SELECT * FROM units WHERE id = ? AND is_active = 1 AND is_deleted = 0",
-        (unit_id,),
+        "SELECT * FROM units WHERE id = ? AND is_active = 1 AND is_deleted = 0 AND environment = ?",
+        (unit_id, environment),
     ).fetchone()
     if category is None:
         error = error or "大分類に対応する有効な中分類を選択してください。"
@@ -2224,15 +2558,16 @@ def save_product_form(product=None):
         message = f"「{name}」を更新しました。"
     else:
         display_order = db.execute(
-            "SELECT COALESCE(MAX(display_order), 0) + 10 FROM products"
+            "SELECT COALESCE(MAX(display_order), 0) + 10 FROM products WHERE environment = ?",
+            (environment,),
         ).fetchone()[0]
         db.execute(
             """INSERT INTO products
                (name, major_category_id, subcategory_id, unit_id, unit, unit_price,
-                image_filename, display_order)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                image_filename, display_order, environment)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (name, major_id, subcategory_id, unit_id, unit["name"], unit_price,
-             image_filename, display_order),
+             image_filename, display_order, environment),
         )
         message = f"「{name}」を登録しました。"
     db.commit()
@@ -2263,10 +2598,14 @@ def save_product_image(image):
     return filename
 
 
-def orderable_products():
+def orderable_products(environment=None):
+    environment = environment or (
+        load_context_stores(current_order_context())["from_store"]["environment"]
+        if current_order_context() else master_environment()
+    )
     return get_db().execute(
         """SELECT p.*, major.name AS major_name, sub.name AS subcategory_name,
-                  u.name AS unit_name
+                  u.name AS unit_name, u.decimal_places
            FROM products p
            JOIN product_categories major ON major.id = p.major_category_id
            JOIN product_categories sub ON sub.id = p.subcategory_id
@@ -2275,7 +2614,10 @@ def orderable_products():
              AND major.is_active = 1 AND major.is_deleted = 0
              AND sub.is_active = 1 AND sub.is_deleted = 0
              AND u.is_active = 1 AND u.is_deleted = 0
-           ORDER BY major.name, sub.name, p.display_order, p.name, p.id"""
+             AND p.environment = ? AND major.environment = ?
+             AND sub.environment = ? AND u.environment = ?
+           ORDER BY major.name, sub.name, p.display_order, p.name, p.id""",
+        (environment, environment, environment, environment),
     ).fetchall()
 
 
@@ -2422,7 +2764,7 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, env
     lines = []
     for row in ordered_rows:
         correction = corrections.get(("order_item", row["id"]))
-        final_quantity = row["final_received_quantity"]
+        final_quantity = None if row["final_received_quantity_minor"] is None else minor_to_decimal(row["final_received_quantity_minor"])
         product_name = row["product_name"]
         major_name = row["major_category_name"] or "未分類"
         sub_name = row["subcategory_name"] or "未分類"
@@ -2433,12 +2775,12 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, env
             major_name = correction["corrected_major_category_name"]
             sub_name = correction["corrected_subcategory_name"]
             unit = correction["corrected_unit"]
-            final_quantity = correction["corrected_quantity"]
+            final_quantity = minor_to_decimal(correction["corrected_quantity_minor"])
             final_price = correction["corrected_unit_price"]
         status_label = order_status_label(row, final_quantity)
         lines.append(make_report_line(
             row, "order_item", row["id"], product_name, major_name, sub_name, unit,
-            row["quantity"], final_quantity, row["unit_price"], final_price,
+            minor_to_decimal(row["quantity_minor"]), final_quantity, row["unit_price"], final_price,
             status_label, bool(correction),
         ))
 
@@ -2449,7 +2791,7 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, env
     }
     for row in unexpected_rows:
         correction = corrections.get(("unexpected_item", row["id"]))
-        final_quantity = row["final_received_quantity"]
+        final_quantity = None if row["final_received_quantity_minor"] is None else minor_to_decimal(row["final_received_quantity_minor"])
         product_name = row["product_name"]
         major_name = row["major_category_name"] or "未分類"
         sub_name = row["subcategory_name"] or "未分類"
@@ -2460,7 +2802,7 @@ def transaction_lines(start_date=None, end_date=None, related_store_id=None, env
             major_name = correction["corrected_major_category_name"]
             sub_name = correction["corrected_subcategory_name"]
             unit = correction["corrected_unit"]
-            final_quantity = correction["corrected_quantity"]
+            final_quantity = minor_to_decimal(correction["corrected_quantity_minor"])
             final_price = correction["corrected_unit_price"]
         lines.append(make_report_line(
             row, "unexpected_item", row["id"], product_name, major_name, sub_name, unit,
@@ -2476,11 +2818,11 @@ def make_report_line(row, line_type, line_id, product_name, major_name, sub_name
                      ordered_quantity, final_quantity, ordered_price, final_price,
                      status_label, corrected, original_product_name=None):
     created_at = row["order_created_at"]
-    ordered_quantity = float(ordered_quantity or 0)
-    final_quantity = None if final_quantity is None else float(final_quantity)
-    ordered_amount = 0 if ordered_price is None else round(ordered_quantity * ordered_price)
+    ordered_quantity = Decimal(str(ordered_quantity or 0))
+    final_quantity = None if final_quantity is None else Decimal(str(final_quantity))
+    ordered_amount = 0 if ordered_price is None else int((ordered_quantity * ordered_price).quantize(Decimal("1")))
     final_amount = None if final_quantity is None else (
-        0 if final_price is None else round(final_quantity * final_price)
+        0 if final_price is None else int((final_quantity * final_price).quantize(Decimal("1")))
     )
     return {
         "line_type": line_type, "line_id": line_id,
@@ -2505,7 +2847,7 @@ def order_status_label(row, final_quantity):
         return "受取待ち"
     if row["order_status"] == "pending_sender_approval":
         return "数量差異・承認待ち"
-    if final_quantity is not None and float(final_quantity) != float(row["quantity"]):
+    if final_quantity is not None and Decimal(str(final_quantity)) != minor_to_decimal(row["quantity_minor"]):
         return "数量変更・承認済"
     return "承認済"
 
@@ -2522,7 +2864,7 @@ def aggregate_products(lines):
         group = groups.setdefault(key, {
             "major_category_name": key[0], "subcategory_name": key[1],
             "product_name": key[2], "unit": key[3], "unit_price": key[4],
-            "quantity": 0, "amount": 0, "details": [],
+            "quantity": Decimal("0"), "amount": 0, "details": [],
         })
         group["quantity"] += line["final_quantity"]
         group["amount"] += line["final_amount"] or 0
@@ -2557,7 +2899,7 @@ def aggregate_counterparty_products(lines, store_id, direction):
         key = (product_name, counterpart, unit, price)
         group = groups.setdefault(key, {
             "product_name": product_name, "counterpart": counterpart,
-            "unit": unit, "unit_price": price, "quantity": 0, "amount": 0,
+            "unit": unit, "unit_price": price, "quantity": Decimal("0"), "amount": 0,
         })
         group["quantity"] += quantity
         group["amount"] += amount
@@ -2576,7 +2918,8 @@ def correction_snapshot(line):
         "product_id": line["product_id"], "product_name": line["product_name"],
         "major_category_name": line["major_category_name"],
         "subcategory_name": line["subcategory_name"], "unit": line["unit"],
-        "quantity": line["final_quantity"], "unit_price": line["unit_price"],
+        "quantity": None if line["final_quantity"] is None else float(line["final_quantity"]),
+        "unit_price": line["unit_price"],
     }
 
 
