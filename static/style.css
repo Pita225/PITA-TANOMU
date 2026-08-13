@@ -416,3 +416,181 @@ body.training-mode { --ink: #edf3f7; --muted: #a9b5c0; --paper: #11161d; --card:
   .store-case-card { flex-direction: column; }
   .case-state { width: 100%; min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); text-align: left; }
 }
+
+/* Training environment: keep the unmistakable dark theme while ensuring that
+   every foreground remains readable. This block intentionally comes last so
+   component styles declared above cannot restore production-only colours. */
+body.training-mode {
+  --ink: #f4f7fa;
+  --muted: #c3cdd7;
+  --paper: #0d131a;
+  --card: #18222d;
+  --line: #526170;
+  --green: #72e0b8;
+  --green-dark: #9af0d1;
+  --error: #ffb3b3;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.training-mode .site-header,
+.training-mode footer {
+  color: var(--ink);
+  background: #141d27;
+  border-color: var(--line);
+}
+
+.training-mode :where(h1, h2, h3, p, dt, dd, label, legend, th, td, summary, strong, b) {
+  color: inherit;
+}
+
+.training-mode :where(.hero p, .lead, .meta, .order-card p, .empty-state,
+  .transaction-route small, .total-row small, .order-ref, .daily-product-card small,
+  .daily-breakdown span, .correction-original dt, .history-card p,
+  .history-change small, .section-heading span, .receipt-product p,
+  .received-result > span, .exception-card p, .exception-status small,
+  .sender-approval-card p, .table-price, .status-card p, .pending-route,
+  .quantity-summary, .next-action p, .waiting-message, .managed-product-info p,
+  .master-row small, .photo-field small, .account-row > div:first-child span,
+  .edit-card label small, footer) {
+  color: var(--muted);
+}
+
+.training-mode :where(.card, .table-card, .product-row, .order-card, .empty-state,
+  .store-table-card, .status-card, .account-row, .master-row, .managed-product-card,
+  .receipt-row, .exception-card, .pending-card, .daily-product-card) {
+  color: var(--ink);
+  background: var(--card);
+  border-color: var(--line);
+}
+
+.training-mode :where(.route-chip, .transaction-route, .csv-panel,
+  .complete-card dl, .history-change span, .photo-field, .management-links a) {
+  color: var(--ink);
+  background: #23303c;
+  border-color: var(--line);
+}
+
+.training-mode :where(input, select, textarea) {
+  color: #ffffff;
+  background: #080e14;
+  border-color: #738394;
+  caret-color: #ffffff;
+}
+
+.training-mode :where(input, textarea)::placeholder { color: #aebbc7; opacity: 1; }
+.training-mode select option { color: #ffffff; background: #101820; }
+.training-mode :where(input, select, textarea):focus {
+  border-color: #72e0b8;
+  outline: 3px solid rgba(114, 224, 184, .28);
+}
+.training-mode :where(input, select, textarea):disabled {
+  color: #c4ced7;
+  background: #26313c;
+  opacity: 1;
+}
+.training-mode .photo-field input { color: #ffffff; background: #080e14; }
+.training-mode input:-webkit-autofill,
+.training-mode input:-webkit-autofill:hover,
+.training-mode input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #ffffff;
+  box-shadow: 0 0 0 1000px #080e14 inset;
+  caret-color: #ffffff;
+}
+
+.training-mode a:not(.button):not(.small-button) { text-decoration-color: #72e0b8; }
+.training-mode :where(.back-link, .report-store-link, .order-number,
+  .transaction-inline b, .transaction-inline > span, .route-chip span,
+  .live-subtotal, .item-kind, .case-state > small, .management-links span,
+  .category-path, .approval-note) { color: #8ce9c8; }
+.training-mode nav a:hover { color: #ffffff; background: #2a3744; }
+.training-mode .brand::before,
+.training-mode .checkmark { color: #071b15; }
+
+.training-mode .button-primary {
+  color: #071b15;
+  background: #72e0b8;
+  box-shadow: 0 8px 20px rgba(114, 224, 184, .18);
+}
+.training-mode .button-primary:hover { color: #061610; background: #9af0d1; }
+.training-mode :where(.button-secondary, .small-button) {
+  color: #f7fafc;
+  background: #334252;
+  border: 1px solid #657588;
+}
+.training-mode :where(.button-secondary, .small-button):hover { background: #405267; }
+.training-mode :where(.button-resume, .checkmark-small) { color: #071b15; background: #72e0b8; }
+.training-mode .button-pause { color: #fff0b8; background: #514623; border-color: #8c7840; }
+.training-mode :where(.button-danger, .remove-extra) { color: #ffdede; background: #642d35; border-color: #a24b58; }
+.training-mode .login-status button { color: #b5f4dc; border-color: #6d8178; }
+
+.training-mode table { color: var(--ink); background: var(--card); }
+.training-mode th { color: #e4ebf1; background: #263442; }
+.training-mode :where(th, td, tr) { border-color: var(--line); }
+.training-mode td { color: #f4f7fa; }
+.training-mode :where(.money, .number-cell, .report-store-link) { color: #ffffff; }
+.training-mode :where(.total-row, .report-table tfoot th) {
+  color: #ffffff;
+  background: #263a36;
+}
+.training-mode .total-row strong { color: #a5f3d7; }
+.training-mode .corrected-row { background: #302737; }
+.training-mode .daily-breakdown { border-color: var(--line); }
+
+.training-mode .status-active { color: #bff7e2; background: #214b3d; }
+.training-mode :where(.status-paused, .mini-tag) { color: #ffedae; background: #50451f; }
+.training-mode :where(.status-ordered, .approval-waiting) {
+  color: #d6eaff;
+  background: #29465f;
+  border-color: #50789a;
+}
+.training-mode :where(.status-return, .unexpected-label) { color: #ffd9d9; background: #5c2b32; }
+.training-mode .correction-tag { color: #f5d7f1; background: #563650; }
+.training-mode .environment-training { color: #fff0a8; background: #414b59; }
+.training-mode .environment-production { color: #d7f4e9; background: #29443b; }
+.training-mode .difference,
+.training-mode .unexpected-kind,
+.training-mode .received-result small { color: #ffb99f; }
+
+.training-mode :where(.alert-error, .reset-warning, .status-card-pending,
+  .status-card-pending.has-pending, .sender-approval-card) {
+  color: #ffe2dc;
+  background: #482923;
+  border-color: #a96253;
+}
+.training-mode .status-card-pending.has-pending {
+  color: #ffe2dc;
+  background: #482923;
+  border-color: #d77a66;
+}
+.training-mode .status-tabs .pending-tab.active {
+  color: #ffd9d9;
+  background: #48242b;
+}
+.training-mode :where(.alert-success, .approval-banner, .status-card-approved,
+  .success-empty, .logged-store-panel, .environment-view-label) {
+  color: #d4f9eb;
+  background: #1d4236;
+  border-color: #47816c;
+}
+.training-mode .alert { box-shadow: 0 8px 24px rgba(0, 0, 0, .22); }
+.training-mode .training-banner {
+  color: #16120a;
+  background: #ffd65a;
+  border-bottom: 2px solid #fff0a8;
+}
+
+.training-mode :where(.unexpected-form-row, .radio-choice span) {
+  color: var(--ink);
+  background: #23303c;
+  border-color: #647487;
+}
+.training-mode .radio-choice input:checked + span {
+  color: #071b15;
+  background: #8ce9c8;
+  border-color: #c3f7e4;
+}
+.training-mode :where(.product-thumb, .product-order-thumb, .photo-preview) {
+  color: #d2dae2;
+  background: #293744;
+}

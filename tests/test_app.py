@@ -1114,7 +1114,7 @@ class OrderFlowTestCase(unittest.TestCase):
             return row
 
         # 本番→本番は成功し、本番→トレーニングは拒否する。
-        production_order, _ = place_order("production-a", "production-a-pass", 2, "2")
+        production_order, production_item = place_order("production-a", "production-a-pass", 2, "2")
         rejected = self.client.post(
             "/order/start", data={"to_store_id": stores["トレーニング店舗A"][0]},
             follow_redirects=True,
@@ -1167,12 +1167,18 @@ class OrderFlowTestCase(unittest.TestCase):
             f"/receipts/{unrelated_order}", data={f"received_quantity_{unrelated_item}": "4"}
         ).status_code, 403)
 
-        # 社長確認用は全トレーニング機能を使えるが、本番へはアクセスできない。
+        # 社長確認用はトレーニング専用で、本番の表示・操作を拒否する。
         login("president-review", "president-review-new-pass")
-        reviewer_page = self.client.get("/").get_data(as_text=True)
+        reviewer_page = self.client.get("/?environment=production").get_data(as_text=True)
         self.assertIn("トレーニング環境", reviewer_page)
         self.assertIn("training-mode", reviewer_page)
         self.assertEqual(self.client.get(f"/received/{production_order}").status_code, 403)
+        self.assertEqual(self.client.get(f"/receipts/{production_order}").status_code, 403)
+        self.assertEqual(self.client.post(
+            f"/receipts/{production_order}",
+            data={f"received_quantity_{production_item}": "2"},
+        ).status_code, 403)
+        self.assertEqual(self.client.post(f"/received/{production_order}/approve").status_code, 403)
         self.assertEqual(self.client.get("/reports/store/1").status_code, 403)
         self.assertEqual(self.client.get("/stores").status_code, 403)
         reviewer_rejected = self.client.post("/order/start", data={
@@ -1204,6 +1210,7 @@ class OrderFlowTestCase(unittest.TestCase):
             f"/reports/csv?direction=orders&start_date={today}&end_date={today}"
         )
         self.assertTrue(training_csv.data.startswith(b"\xef\xbb\xbf"))
+        self.assertNotIn("本店", training_csv.data.decode("utf-8-sig"))
         for path in ("/status/orders", "/status/receipts", "/status/approved", "/received", "/receipts", "/reports"):
             page = self.client.get(path).get_data(as_text=True)
             self.assertIn("training-mode", page)
