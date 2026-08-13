@@ -3,11 +3,17 @@ import tempfile
 import unittest
 import csv
 import io
+import time
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+from unittest import mock
 
-from app import create_app, init_db, migrate_db
+from itsdangerous import URLSafeTimedSerializer
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from app import ADMIN_RECOVERY_SALT, create_app, init_db, migrate_db
+from admin_recovery import create_recovery_token
 
 
 class OrderFlowTestCase(unittest.TestCase):
@@ -31,6 +37,117 @@ class OrderFlowTestCase(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_signed_token_recovers_admin_without_plaintext_password_storage(self):
+        second_client = self.app.test_client()
+        second_login = second_client.post("/login", data={
+            "login_id": "admin", "password": "admin-pass-123",
+        })
+        self.assertEqual(second_login.status_code, 302)
+        recovery_client = self.app.test_client()
+
+        invalid = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": "invalid-token"}
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+        wrong_secret_token = create_recovery_token(
+            "different-secret", "attacker-admin", "attacker-password"
+        )
+        wrong_secret = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": wrong_secret_token}
+        )
+        self.assertEqual(wrong_secret.status_code, 400)
+
+        serializer = URLSafeTimedSerializer(
+            self.app.config["SECRET_KEY"], salt=ADMIN_RECOVERY_SALT
+        )
+        with mock.patch("time.time", return_value=time.time() - 901):
+            expired_token = serializer.dumps({
+                "purpose": "admin-recovery",
+                "login_id": "expired-admin",
+                "password_hash": generate_password_hash("expired-password"),
+            })
+        expired = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": expired_token}
+        )
+        self.assertEqual(expired.status_code, 400)
+
+        new_password = "recovered-admin-pass"
+        token = create_recovery_token(
+            self.app.config["SECRET_KEY"], "recovered-admin", new_password
+        )
+        recovered = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": token}, follow_redirects=True
+        )
+        self.assertEqual(recovered.status_code, 200)
+        self.assertIn("再設定しました", recovered.get_data(as_text=True))
+
+        for old_client in (self.client, second_client):
+            old_session = old_client.get("/", follow_redirects=False)
+            self.assertEqual(old_session.status_code, 302)
+            self.assertTrue(old_session.headers["Location"].endswith("/login"))
+
+        reused = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": token}
+        )
+        self.assertEqual(reused.status_code, 400)
+
+        old_login = recovery_client.post("/login", data={
+            "login_id": "admin", "password": "admin-pass-123",
+        }, follow_redirects=True)
+        self.assertIn("ログインIDまたはパスワード", old_login.get_data(as_text=True))
+        new_login = recovery_client.post("/login", data={
+            "login_id": "recovered-admin", "password": new_password,
+        })
+        self.assertEqual(new_login.status_code, 302)
+
+        connection = sqlite3.connect(self.database)
+        saved_hash = connection.execute(
+            "SELECT password_hash FROM users WHERE login_id = 'recovered-admin'"
+        ).fetchone()[0]
+        connection.close()
+        self.assertNotEqual(saved_hash, new_password)
+        self.assertTrue(check_password_hash(saved_hash, new_password))
+
+    def test_legacy_session_is_upgraded_then_invalidated_by_admin_recovery(self):
+        connection = sqlite3.connect(self.database)
+        admin_id = connection.execute(
+            "SELECT id FROM users WHERE login_id = 'admin'"
+        ).fetchone()[0]
+        connection.close()
+
+        legacy_client = self.app.test_client()
+        with legacy_client.session_transaction() as legacy_session:
+            legacy_session.clear()
+            legacy_session["user_id"] = admin_id
+
+        first_access = legacy_client.get("/", follow_redirects=False)
+        self.assertEqual(first_access.status_code, 200)
+        with legacy_client.session_transaction() as upgraded_session:
+            self.assertEqual(upgraded_session["user_id"], admin_id)
+            self.assertEqual(upgraded_session["session_version"], 1)
+
+        dormant_legacy_client = self.app.test_client()
+        with dormant_legacy_client.session_transaction() as dormant_session:
+            dormant_session.clear()
+            dormant_session["user_id"] = admin_id
+
+        recovery_client = self.app.test_client()
+        token = create_recovery_token(
+            self.app.config["SECRET_KEY"],
+            "legacy-recovered-admin",
+            "legacy-recovered-password",
+        )
+        recovered = recovery_client.post(
+            "/admin-recovery", data={"recovery_token": token}
+        )
+        self.assertEqual(recovered.status_code, 302)
+
+        for old_client in (legacy_client, dormant_legacy_client):
+            invalidated = old_client.get("/", follow_redirects=False)
+            self.assertEqual(invalidated.status_code, 302)
+            self.assertTrue(invalidated.headers["Location"].endswith("/login"))
 
     def test_complete_order_flow(self):
         response = self.client.get("/")
@@ -627,6 +744,7 @@ class OrderFlowTestCase(unittest.TestCase):
 
         self.client.post(f"/accounts/{user_id}/edit", data={
             "login_id": "honten-new", "password": "new-password-456",
+            "password_confirmation": "new-password-456",
         })
         connection = sqlite3.connect(self.database)
         login_id, new_hash = connection.execute(
@@ -636,6 +754,23 @@ class OrderFlowTestCase(unittest.TestCase):
         self.assertNotEqual(old_hash, new_hash)
         connection.close()
 
+        self.client.post("/logout")
+        old_credentials = self.client.post("/login", data={
+            "login_id": "honten-old", "password": "old-password-123",
+        }, follow_redirects=True)
+        self.assertIn("ログインIDまたはパスワード", old_credentials.get_data(as_text=True))
+        old_password = self.client.post("/login", data={
+            "login_id": "honten-new", "password": "old-password-123",
+        }, follow_redirects=True)
+        self.assertIn("ログインIDまたはパスワード", old_password.get_data(as_text=True))
+        new_credentials = self.client.post("/login", data={
+            "login_id": "honten-new", "password": "new-password-456",
+        })
+        self.assertEqual(new_credentials.status_code, 302)
+        self.client.post("/logout")
+        self.client.post("/login", data={
+            "login_id": "admin", "password": "admin-pass-123",
+        })
         self.client.post(f"/accounts/{user_id}/toggle")
         self.client.post("/logout")
         failed = self.client.post("/login", data={
@@ -1081,12 +1216,32 @@ class OrderFlowTestCase(unittest.TestCase):
         ).fetchone()[0]
         connection.close()
         self.client.post(f"/accounts/{reviewer_id}/edit", data={
-            "login_id": "president-review", "password": "president-review-new-pass",
+            "login_id": "president-review-new", "password": "president-review-new-pass",
+            "password_confirmation": "president-review-new-pass",
+        })
+        self.client.post("/logout")
+        old_reviewer_login = self.client.post("/login", data={
+            "login_id": "president-review", "password": "president-review-pass",
+        }, follow_redirects=True)
+        self.assertIn("ログインIDまたはパスワード", old_reviewer_login.get_data(as_text=True))
+        old_reviewer_password = self.client.post("/login", data={
+            "login_id": "president-review-new", "password": "president-review-pass",
+        }, follow_redirects=True)
+        self.assertIn(
+            "ログインIDまたはパスワード", old_reviewer_password.get_data(as_text=True)
+        )
+        new_reviewer_login = self.client.post("/login", data={
+            "login_id": "president-review-new", "password": "president-review-new-pass",
+        })
+        self.assertEqual(new_reviewer_login.status_code, 302)
+        self.client.post("/logout")
+        self.client.post("/login", data={
+            "login_id": "admin", "password": "admin-pass-123",
         })
         self.client.post(f"/accounts/{reviewer_id}/toggle")
         self.client.post("/logout")
         stopped_login = self.client.post("/login", data={
-            "login_id": "president-review", "password": "president-review-new-pass",
+            "login_id": "president-review-new", "password": "president-review-new-pass",
         })
         self.assertEqual(stopped_login.status_code, 200)
         self.client.post("/login", data={
@@ -1168,7 +1323,7 @@ class OrderFlowTestCase(unittest.TestCase):
         ).status_code, 403)
 
         # 社長確認用はトレーニング専用で、本番の表示・操作を拒否する。
-        login("president-review", "president-review-new-pass")
+        login("president-review-new", "president-review-new-pass")
         reviewer_page = self.client.get("/?environment=production").get_data(as_text=True)
         self.assertIn("トレーニング環境", reviewer_page)
         self.assertIn("training-mode", reviewer_page)
@@ -1249,7 +1404,7 @@ class OrderFlowTestCase(unittest.TestCase):
         ).fetchone()[0], 0)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM products").fetchone()[0], 6)
         self.assertEqual(connection.execute(
-            "SELECT COUNT(*) FROM users WHERE login_id IN ('training-a','training-b','president-review')"
+            "SELECT COUNT(*) FROM users WHERE login_id IN ('training-a','training-b','president-review-new')"
         ).fetchone()[0], 3)
         connection.close()
         return

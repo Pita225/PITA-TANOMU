@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block title %}管理者アカウント復旧 | PITA_タノム{% endblock %}
+{% block content %}
+<section class="card login-card">
+  <span class="eyebrow">ADMIN RECOVERY</span>
+  <h1>管理者アカウント復旧</h1>
+  <p class="lead">RenderのSECRET_KEYで署名された、15分間だけ有効な復旧トークンが必要です。</p>
+  <form method="post">
+    <label><span>復旧トークン</span><textarea name="recovery_token" rows="6" required autocomplete="off" spellcheck="false"></textarea></label>
+    <button class="button button-primary button-wide" type="submit">管理者アカウントを復旧</button>
+  </form>
+  <p class="form-note">パスワードそのものは送信・表示・保存されません。</p>
+</section>
+{% endblock %}

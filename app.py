@@ -4,6 +4,7 @@ import secrets
 import sqlite3
 import uuid
 import csv
+import hashlib
 import io
 import json
 from datetime import date, datetime, timedelta
@@ -15,6 +16,7 @@ from flask import (
     Flask, abort, current_app, flash, g, redirect, render_template, request,
     send_from_directory, session, url_for, Response
 )
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -23,6 +25,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY_FILE = BASE_DIR / ".secret_key"
 ENVIRONMENT_LABELS = {"production": "本番", "training": "トレーニング"}
 TRAINING_STORE_NAMES = ("トレーニング店舗A", "トレーニング店舗B")
+ADMIN_RECOVERY_SALT = "pita-admin-recovery-v1"
+ADMIN_RECOVERY_MAX_AGE = 15 * 60
 
 
 def create_app(test_config=None):
@@ -87,6 +91,7 @@ def create_app(test_config=None):
     @app.before_request
     def load_logged_in_user():
         user_id = session.get("user_id")
+        session_version = session.get("session_version")
         g.user = None
         if user_id:
             user = get_db().execute(
@@ -96,7 +101,19 @@ def create_app(test_config=None):
                    FROM users u LEFT JOIN stores s ON s.id = u.store_id
                    WHERE u.id = ?""", (user_id,)
             ).fetchone()
-            valid = user and user["is_active"]
+            # Deployment before session versioning issued cookies with only user_id.
+            # They belong to the initial generation and may be upgraded only while
+            # the DB is still on that generation. A recovery/reset increments the
+            # DB value, so dormant legacy cookies cannot bypass invalidation later.
+            if session_version is None and user and user["session_version"] == 1:
+                session_version = 1
+                session["session_version"] = session_version
+            valid = (
+                user
+                and user["is_active"]
+                and isinstance(session_version, int)
+                and session_version == user["session_version"]
+            )
             if valid and user["role"] == "store":
                 valid = user["store_is_active"] and not user["store_is_deleted"]
             if valid:
@@ -112,7 +129,7 @@ def create_app(test_config=None):
             or (is_admin() and session.get("view_environment") == "training")
         )
 
-        allowed = {"login", "setup", "static"}
+        allowed = {"login", "setup", "admin_recovery", "static"}
         if request.endpoint in allowed:
             return None
         admin_exists = get_db().execute(
@@ -147,8 +164,82 @@ def create_app(test_config=None):
                 db.commit()
                 session.clear()
                 session["user_id"] = cursor.lastrowid
+                session["session_version"] = 1
                 return redirect(url_for("index"))
         return render_template("setup.html")
+
+    @app.route("/admin-recovery", methods=["GET", "POST"])
+    def admin_recovery():
+        """SECRET_KEYで署名された短期トークンだけを使って通常管理者を復旧する。"""
+        if request.method == "POST":
+            token = request.form.get("recovery_token", "").strip()
+            serializer = URLSafeTimedSerializer(
+                current_app.config["SECRET_KEY"], salt=ADMIN_RECOVERY_SALT
+            )
+            try:
+                payload = serializer.loads(token, max_age=ADMIN_RECOVERY_MAX_AGE)
+            except (BadSignature, SignatureExpired):
+                flash("復旧トークンが無効または期限切れです。", "error")
+                return render_template("admin_recovery.html"), 400
+
+            valid_payload = isinstance(payload, dict)
+            login_id = payload.get("login_id") if valid_payload else None
+            password_hash = payload.get("password_hash") if valid_payload else None
+            valid_hash = isinstance(password_hash, str) and password_hash.startswith(
+                ("scrypt:", "pbkdf2:")
+            ) and len(password_hash) <= 512
+            if (
+                not valid_payload
+                or payload.get("purpose") != "admin-recovery"
+                or validate_login_id(login_id)
+                or not valid_hash
+            ):
+                flash("復旧トークンが無効または期限切れです。", "error")
+                return render_template("admin_recovery.html"), 400
+
+            db = get_db()
+            admins = db.execute(
+                """SELECT id FROM users
+                   WHERE role = 'admin' AND is_training_reviewer = 0 ORDER BY id"""
+            ).fetchall()
+            if len(admins) != 1:
+                flash("通常管理者を一意に特定できないため復旧できません。", "error")
+                return render_template("admin_recovery.html"), 409
+            admin_id = admins[0]["id"]
+            duplicate = db.execute(
+                "SELECT 1 FROM users WHERE login_id = ? AND id <> ?",
+                (login_id, admin_id),
+            ).fetchone()
+            if duplicate:
+                flash("指定されたログインIDはすでに使用されています。", "error")
+                return render_template("admin_recovery.html"), 409
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if db.execute(
+                "SELECT 1 FROM admin_recovery_tokens WHERE token_hash = ?", (token_hash,)
+            ).fetchone():
+                flash("この復旧トークンはすでに使用済みです。", "error")
+                return render_template("admin_recovery.html"), 400
+            try:
+                db.execute(
+                    """UPDATE users
+                       SET login_id = ?, password_hash = ?, is_active = 1,
+                           session_version = session_version + 1
+                       WHERE id = ?""",
+                    (login_id, password_hash, admin_id),
+                )
+                db.execute(
+                    "INSERT INTO admin_recovery_tokens (token_hash) VALUES (?)",
+                    (token_hash,),
+                )
+                db.commit()
+            except sqlite3.IntegrityError:
+                db.rollback()
+                flash("この復旧トークンはすでに使用済みです。", "error")
+                return render_template("admin_recovery.html"), 400
+            session.clear()
+            flash("管理者ログインIDとパスワードを再設定しました。", "success")
+            return redirect(url_for("login"))
+        return render_template("admin_recovery.html")
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -174,6 +265,7 @@ def create_app(test_config=None):
             else:
                 session.clear()
                 session["user_id"] = user["id"]
+                session["session_version"] = user["session_version"]
                 return redirect(url_for("index"))
         return render_template("login.html")
 
@@ -1329,9 +1421,12 @@ def create_app(test_config=None):
         if request.method == "POST":
             login_id = normalize_login_id(request.form.get("login_id"))
             password = request.form.get("password", "")
+            password_confirmation = request.form.get("password_confirmation", "")
             error = validate_login_id(login_id)
             if password and len(password) < 8:
                 error = "新しいパスワードは8文字以上で入力してください。"
+            elif password and password != password_confirmation:
+                error = "確認用パスワードが一致しません。"
             if db.execute(
                 "SELECT 1 FROM users WHERE login_id = ? AND id <> ?", (login_id, user_id)
             ).fetchone():
@@ -1341,11 +1436,18 @@ def create_app(test_config=None):
             else:
                 if password:
                     db.execute(
-                        "UPDATE users SET login_id = ?, password_hash = ? WHERE id = ?",
+                        """UPDATE users
+                           SET login_id = ?, password_hash = ?,
+                               session_version = session_version + 1
+                           WHERE id = ?""",
                         (login_id, generate_password_hash(password), user_id),
                     )
                 else:
-                    db.execute("UPDATE users SET login_id = ? WHERE id = ?", (login_id, user_id))
+                    db.execute(
+                        """UPDATE users SET login_id = ?,
+                               session_version = session_version + 1 WHERE id = ?""",
+                        (login_id, user_id),
+                    )
                 db.commit()
                 flash(f"{account['store_name']}のアカウントを更新しました。", "success")
                 return redirect(url_for("accounts"))
@@ -1365,7 +1467,11 @@ def create_app(test_config=None):
         if account is None:
             abort(404)
         new_status = 0 if account["is_active"] else 1
-        db.execute("UPDATE users SET is_active = ? WHERE id = ?", (new_status, user_id))
+        db.execute(
+            """UPDATE users SET is_active = ?,
+                   session_version = session_version + 1 WHERE id = ?""",
+            (new_status, user_id),
+        )
         db.commit()
         flash(f"{account['store_name']}のアカウントを{'再開' if new_status else '停止'}しました。", "success")
         return redirect(url_for("accounts"))
@@ -1610,6 +1716,7 @@ def migrate_db():
                store_id INTEGER UNIQUE,
                is_active INTEGER NOT NULL DEFAULT 1,
                is_training_reviewer INTEGER NOT NULL DEFAULT 0,
+               session_version INTEGER NOT NULL DEFAULT 1,
                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                FOREIGN KEY (store_id) REFERENCES stores (id),
                CHECK (role IN ('admin', 'store')),
@@ -1622,6 +1729,17 @@ def migrate_db():
         db.execute(
             "ALTER TABLE users ADD COLUMN is_training_reviewer INTEGER NOT NULL DEFAULT 0"
         )
+    if "session_version" not in user_columns:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1"
+        )
+
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS admin_recovery_tokens (
+               token_hash TEXT PRIMARY KEY,
+               used_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+           )"""
+    )
 
     legacy_names = ("テスト店舗A", "テスト店舗B", "デモ店舗A", "デモ店舗B")
     legacy_rows = db.execute(

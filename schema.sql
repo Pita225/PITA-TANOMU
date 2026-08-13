@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
 DROP TABLE IF EXISTS units;
 DROP TABLE IF EXISTS product_categories;
+DROP TABLE IF EXISTS admin_recovery_tokens;
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS stores;
 
@@ -25,10 +26,16 @@ CREATE TABLE users (
     store_id INTEGER UNIQUE,
     is_active INTEGER NOT NULL DEFAULT 1,
     is_training_reviewer INTEGER NOT NULL DEFAULT 0,
+    session_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (store_id) REFERENCES stores (id),
     CHECK (role IN ('admin', 'store')),
     CHECK ((role = 'admin' AND store_id IS NULL) OR (role = 'store' AND store_id IS NOT NULL))
+);
+
+CREATE TABLE admin_recovery_tokens (
+    token_hash TEXT PRIMARY KEY,
+    used_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE product_categories (
